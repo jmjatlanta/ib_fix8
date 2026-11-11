@@ -27,6 +27,38 @@ GatewayConnector::GatewayConnector(const std::string& host, int port, int client
 	connect();
 }
 
+bool GatewayConnector::connect()
+{
+	if (IsConnected() || currentConnectionStatus == ConnectionStatus::ATTEMPTING_CONNECTION
+			|| currentConnectionStatus == ConnectionStatus::PARTIALLY_CONNECTED)
+		return IsConnected();
+	currentConnectionStatus = ConnectionStatus::ATTEMPTING_CONNECTION;
+	osSignal = new EReaderOSSignal(1000);
+	ibClient = new EClientSocket(this, osSignal);
+	ibClient->asyncEConnect(true);
+	if (!ibClient->eConnect(hostname.c_str(), port, clientId, false))
+	{
+		delete ibClient;
+		ibClient = nullptr;
+		delete osSignal;
+		osSignal = nullptr;
+		currentConnectionStatus = ConnectionStatus::NOT_STARTED;
+		return false;
+	}
+	currentConnectionStatus = ConnectionStatus::PARTIALLY_CONNECTED; // until nextValidId
+	if (listenerThread != nullptr && listenerThread->joinable())
+		listenerThread->join();
+	listenerThread = std::make_shared<std::thread>(&GatewayConnector::processMessages, this);
+	return true;
+}
+
+void GatewayConnector::connectAck()
+{
+	ib_helper::IBConnector::connectAck();
+	if (ibClient != nullptr && ibClient->asyncEConnect())
+		ibClient->startApi();
+}
+
 GatewayConnector::~GatewayConnector()
 {
 	stopReconnect();

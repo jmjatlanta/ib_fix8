@@ -24,6 +24,7 @@ add_executable(ib_fix_tests
 	GatewayTest.cpp
 	TwsSettingsTest.cpp
 	EngineTest.cpp
+	OrderJournalTest.cpp
 )
 target_link_libraries(ib_fix_tests PRIVATE ib_fix::engine GTest::gtest_main)
 target_compile_definitions(ib_fix_tests PRIVATE

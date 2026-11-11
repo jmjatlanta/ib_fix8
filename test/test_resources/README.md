@@ -13,7 +13,9 @@ The reconnection tests (`test/TwsReconnectTest.cpp`) put a small TCP proxy betwe
 and TWS and use it to close or reset the connection and to refuse new ones for a few seconds.
 They check that requests are refused while TWS is unreachable, that the gateway reconnects, that
 a resting order survives, and (while the market is open) that a fill whose reports were lost with
-the connection is reported after reconnecting. They use API client ids `client_id + 1` and
+the connection is reported after reconnecting. They also restart the engine with an order
+journal, and check that a resting order is still managed and that a fill that happened while
+the engine was stopped is reported once. They use API client ids `client_id + 1` and
 `client_id + 2` as well as `client_id`.
 
 ## Safety

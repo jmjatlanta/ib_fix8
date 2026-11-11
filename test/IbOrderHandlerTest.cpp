@@ -2,6 +2,8 @@
 #include "ib/IbOrderHandler.hpp"
 #include "OrderState.h"
 #include <gtest/gtest.h>
+#include <filesystem>
+#include <fstream>
 #include <map>
 
 using namespace ib_fix;
@@ -530,4 +532,165 @@ TEST_F(IbOrderHandlerTest, CallbacksForUnknownOrdersAreIgnored)
 	handler.onOrderError(9999, 201, "rejected");
 	EXPECT_TRUE(responder.reports.empty());
 	EXPECT_TRUE(responder.cancelRejects.empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// order journal and restart recovery
+// ---------------------------------------------------------------------------------------------
+namespace {
+
+std::filesystem::path freshJournal(const std::string& name)
+{
+	const auto dir = std::filesystem::path(TEST_OUTPUT_DIR) / "handler_journal";
+	std::filesystem::create_directories(dir);
+	const auto path = dir / name;
+	std::filesystem::remove(path);
+	return path;
+}
+
+/// the last state saved for an order (read without rewriting the file)
+std::optional<ib::OrderRecord> lastSaved(const std::filesystem::path& path, int ibOrderId)
+{
+	std::optional<ib::OrderRecord> last;
+	std::ifstream in(path);
+	std::string line;
+	while (std::getline(in, line))
+		if (auto r = ib::fromJournalLine(line); r && r->ibOrderId == ibOrderId)
+			last = r;
+	return last;
+}
+
+NewOrderRequest buyLimit(const std::string& clOrdId, double qty = 100)
+{
+	NewOrderRequest r;
+	r.clOrdId = clOrdId;
+	r.symbol = "AAPL";
+	r.side = fv::SideBuy;
+	r.orderQty = qty;
+	r.ordType = fv::OrdTypeLimit;
+	r.price = 190.25;
+	return r;
+}
+
+void submitted(ib::IbOrderHandler& h, int id)
+{
+	h.OnOrderStatus(id, "Submitted", dec(0), dec(0), 0, 0, 0, 0, 0, "", 0);
+}
+
+} // namespace
+
+TEST_F(IbOrderHandlerTest, JournalHoldsOnlyWhatTheClientHasBeenTold)
+{
+	const auto path = freshJournal("told.journal");
+	ib::OrderJournal journal(path);
+	handler.setJournal(&journal);
+
+	const int id = placeAndAck("ord-1");
+	auto saved = lastSaved(path, id);
+	ASSERT_TRUE(saved.has_value());
+	EXPECT_TRUE(saved->acknowledged);
+	EXPECT_EQ(saved->clientCompId, Client);
+	EXPECT_EQ(saved->clOrdIds, std::vector<std::string>{ "ord-1" });
+
+	// a fill the client cannot receive yet is not saved...
+	responder.online = false;
+	handler.OnExecDetails(-1, Contract{}, makeExecution(id, "exec-1", 40, 190.0, 40, 190.0));
+	saved = lastSaved(path, id);
+	EXPECT_EQ(saved->cumQty, 0.0);
+	EXPECT_TRUE(saved->execIds.empty());
+
+	// ... until it has been delivered
+	responder.online = true;
+	handler.onLogon(Client);
+	saved = lastSaved(path, id);
+	EXPECT_EQ(saved->cumQty, 40.0);
+	EXPECT_EQ(saved->execIds, std::set<std::string>{ "exec-1" });
+
+	// a cancel request is saved as soon as it is sent to TWS
+	handler.onCancel(Client, CancelRequest{ "cxl-1", "ord-1" });
+	saved = lastSaved(path, id);
+	ASSERT_TRUE(saved->pending.has_value());
+	EXPECT_EQ(saved->pending->clOrdId, "cxl-1");
+}
+
+TEST(IbOrderHandlerRecovery, RestartedHandlerPicksUpItsOrders)
+{
+	const auto path = freshJournal("restart.journal");
+	int filledMeanwhile = 0, partial = 0, gone = 0, cancelPending = 0;
+	{
+		// first run
+		FakeConnector connector;
+		FakeResponder responder;
+		ib::IbOrderHandler handler(connector);
+		handler.setResponder(&responder);
+		ib::OrderJournal journal(path);
+		handler.setJournal(&journal);
+		auto place = [&](const std::string& clOrdId) {
+			handler.onNewOrder(Client, buyLimit(clOrdId));
+			const int id = connector.placed().back().orderId;
+			submitted(handler, id);
+			return id;
+		};
+		filledMeanwhile = place("ord-filled");
+		partial = place("ord-partial");
+		gone = place("ord-gone");
+		cancelPending = place("ord-cxl");
+		handler.OnExecDetails(-1, Contract{}, makeExecution(partial, "exec-1", 40, 190.0, 40, 190.0));
+		handler.onCancel(Client, CancelRequest{ "cxl-1", "ord-cxl" });
+		// the strategy disconnects; a fill arrives and waits for it; then the gateway stops
+		responder.online = false;
+		handler.OnExecDetails(-1, Contract{}, makeExecution(filledMeanwhile, "exec-w1", 100, 190.0, 100, 190.0));
+		EXPECT_EQ(handler.undeliveredCount(Client), 1u);
+	}
+
+	// second run
+	FakeConnector connector;
+	FakeResponder responder;
+	responder.online = false; // the strategy has not logged on yet
+	ib::IbOrderHandler handler(connector);
+	handler.setResponder(&responder);
+	ib::OrderJournal journal(path);
+	const auto saved = journal.load();
+	ASSERT_EQ(saved.orders.size(), 4u);
+	EXPECT_EQ(handler.recover(saved.orders), 4u) << "the queued fill was never delivered, so ord-filled is still working";
+	handler.setJournal(&journal);
+
+	handler.onTwsConnected();
+	EXPECT_EQ(connector.refreshRequests, 1);
+	// TWS replays the day's executions: one already reported, two not
+	handler.OnExecDetails(1, Contract{}, makeExecution(partial, "exec-1", 40, 190.0, 40, 190.0));
+	handler.OnExecDetails(1, Contract{}, makeExecution(filledMeanwhile, "exec-w1", 100, 190.0, 100, 190.0));
+	handler.OnExecDetails(1, Contract{}, makeExecution(partial, "exec-2", 10, 191.0, 50, 190.2));
+	handler.OnExecDetailsEnd(1);
+	// open orders: ord-gone was canceled while the gateway was down
+	for (int id : { partial, cancelPending })
+		handler.OnOpenOrder(id, Contract{}, ::Order{}, OrderState{});
+	handler.OnOpenOrderEnd();
+	EXPECT_TRUE(responder.reports.empty());
+	EXPECT_EQ(handler.undeliveredCount(Client), 4u);
+
+	// the strategy logs on and learns what happened, once
+	responder.online = true;
+	handler.onLogon(Client);
+	std::map<std::string, std::vector<ExecutionReport>> reports;
+	for (const auto& [client, r] : responder.reports)
+		reports[r.clOrdId].push_back(r);
+	ASSERT_EQ(reports["ord-filled"].size(), 1u);
+	EXPECT_EQ(reports["ord-filled"][0].execId, "exec-w1");
+	EXPECT_EQ(reports["ord-filled"][0].execType, fv::ExecFill);
+	ASSERT_EQ(reports["ord-partial"].size(), 1u) << "exec-1 had been reported before the restart";
+	EXPECT_EQ(reports["ord-partial"][0].execId, "exec-2");
+	EXPECT_EQ(reports["ord-partial"][0].cumQty, 50.0);
+	ASSERT_EQ(reports["ord-gone"].size(), 1u);
+	EXPECT_EQ(reports["ord-gone"][0].execType, fv::ExecCanceled);
+	ASSERT_EQ(responder.cancelRejects.size(), 1u);
+	EXPECT_EQ(responder.cancelRejects[0].second.clOrdId, "cxl-1");
+	EXPECT_NE(responder.cancelRejects[0].second.text.find("Not confirmed"), std::string::npos);
+
+	// recovered orders are managed as before: by ClOrdID, on the same TWS order id
+	handler.onCancel(Client, CancelRequest{ "cxl-9", "ord-partial" });
+	EXPECT_EQ(connector.canceled(), std::vector<int>{ partial });
+	handler.onNewOrder(Client, buyLimit("ord-partial"));
+	EXPECT_EQ(responder.reports.back().second.execType, fv::ExecRejected) << "ClOrdIDs from before the restart are still in use";
+	EXPECT_EQ(*responder.reports.back().second.ordRejReason, fv::OrdRejDuplicateOrder);
 }

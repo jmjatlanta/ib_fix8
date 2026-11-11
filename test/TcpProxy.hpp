@@ -25,8 +25,9 @@ class TcpProxy
 	void setListening(bool listening);
 	/// end every current connection: with reset, both sides get a TCP reset instead of an orderly close
 	void dropConnections(bool reset);
-	/// false: hold back data from the server (it stays queued, and is lost if the connection is dropped)
-	void setForwardingFromServer(bool forwarding) { forwardFromServer_ = forwarding; }
+	/// false: hold back data from the server on the connections open now (it stays queued, and is
+	/// lost if the connection is dropped); connections made later are not held back
+	void setForwardingFromServer(bool forwarding);
 	size_t connectionCount() const;
 
 	private:
@@ -37,6 +38,7 @@ class TcpProxy
 		std::atomic<bool> drop = false;
 		std::atomic<bool> reset = false;
 		std::atomic<bool> finished = false;
+		std::atomic<bool> holdBack = false;   // do not forward data from the server
 		std::thread thread;
 	};
 
@@ -50,7 +52,6 @@ class TcpProxy
 	int port_ = 0;
 	std::atomic<int> listenFd_ = -1;
 	std::atomic<bool> stop_ = false;
-	std::atomic<bool> forwardFromServer_ = true;
 	std::thread acceptThread_;
 	mutable std::mutex linksMutex_;
 	std::list<std::unique_ptr<Link>> links_;

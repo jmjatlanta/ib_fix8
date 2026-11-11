@@ -36,6 +36,16 @@ class GatewayConnector : public ib_helper::IBConnector
 	GatewayConnector(const std::string& host, int port, int clientId);
 	~GatewayConnector() override;
 
+	/***
+	 * Like ib_helper::IBConnector::connect(), but without waiting for TWS to answer: the TWS API's
+	 * synchronous connect blocks until TWS replies, forever if TWS accepts the connection and
+	 * then never answers (for example while it waits for someone to accept the connection in its
+	 * dialog). Here the handshake completes in the background; IsConnected() becomes true when
+	 * it has, and a handshake that stalls is retried by the reconnection supervisor.
+	 * @return false if the TCP connection could not be made
+	 */
+	bool connect() override;
+
 	void setListener(TwsEventListener* listener) { listener_ = listener; }
 	/// receives connection progress messages
 	void setLog(std::function<void(const std::string&)> log);
@@ -66,6 +76,8 @@ class GatewayConnector : public ib_helper::IBConnector
 	void error(int id, time_t errorTime, int errorCode, const std::string& errorString,
 			const std::string& advancedOrderRejectJson) override;
 	void nextValidId(OrderId orderId) override;
+	/// TWS answered the asynchronous handshake: start the API session
+	void connectAck() override;
 	void connectionClosed() override;
 
 	private:

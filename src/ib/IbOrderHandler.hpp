@@ -2,10 +2,13 @@
 // Executes FIX clients' orders through TWS and reports their progress back as FIX messages.
 #include "GatewayConnector.hpp"
 #include "IbTranslation.hpp"
+#include "OrderJournal.hpp"
+#include "OrderRecord.hpp"
 #include "OrderRequestHandler.hpp"
 #include "IBConnector.hpp"
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -37,6 +40,12 @@ namespace ib_fix::ib {
  * client's open orders. Afterwards, an order that is neither filled nor open in TWS is reported
  * Canceled, and a cancel or replace still pending on an open order is rejected as unconfirmed.
  *
+ * With an OrderJournal, each order's state is saved as the client is told about it (when a
+ * report is handed to the FIX session, not when it is queued), so after a restart recover()
+ * restores the orders and the same catch-up brings them up to date: fills already reported are
+ * not reported again, and what happened meanwhile is reported (at least once: a report sent just
+ * before a crash, but not yet saved, is sent again with the same ExecID).
+ *
  * Thread safety: FIX callbacks arrive on the sessions' reader threads, TWS callbacks on the
  * TWS reader thread; all state is guarded by one mutex.
  */
@@ -60,6 +69,16 @@ class IbOrderHandler : public OrderRequestHandler,
 
 	/// reports waiting for a client to log on
 	size_t undeliveredCount(const std::string& clientCompId) const;
+	/// where order state is saved; nullptr: not saved
+	void setJournal(OrderJournal* journal);
+	/// receives warnings (e.g. orders in TWS that are not in the journal)
+	void setLog(std::function<void(const std::string&)> log);
+	/***
+	 * Take back orders saved by an earlier run (OrderJournal::load). Call before the first catch-up
+	 * (onTwsConnected), which then brings them up to date with TWS.
+	 * @return the number of orders still working
+	 */
+	size_t recover(const std::vector<OrderRecord>& orders);
 
 	// OrderRequestHandler (from the FIX acceptor)
 	void onNewOrder(const std::string& clientCompId, const NewOrderRequest& request) override;
@@ -87,28 +106,12 @@ class IbOrderHandler : public OrderRequestHandler,
 	bool isResyncing() const;
 
 	private:
-	struct PendingChange
-	{
-		bool isReplace = false;
-		std::string clOrdId;
-		ReplaceRequest replace;   // the new terms, when isReplace
-	};
-
-	struct OrderRecord
-	{
-		std::string clientCompId;
-		int ibOrderId = 0;
-		NewOrderRequest terms;    // current terms; terms.clOrdId is the current ClOrdID
-		char ordStatus = fix_value::ExecPendingNew;
-		bool acknowledged = false;
-		double cumQty = 0.0;
-		double avgPx = 0.0;
-		std::optional<PendingChange> pending;
-		std::set<std::string> execIds;
-		bool isTerminal() const;
-	};
-
 	using Outbound = std::variant<ExecutionReport, OrderCancelReject>;
+	struct Queued
+	{
+		Outbound msg;
+		std::optional<OrderRecord> snapshot; // the order's state once the client has this message
+	};
 
 	// all of these expect mutex_ to be held
 	OrderRecord* find(const std::string& clientCompId, const std::string& clOrdId);
@@ -118,7 +121,9 @@ class IbOrderHandler : public OrderRequestHandler,
 	void reject(const std::string& clientCompId, const NewOrderRequest& request, int reason, const std::string& text);
 	void cancelReject(const std::string& clientCompId, const OrderRecord* order, const std::string& clOrdId,
 			const std::string& origClOrdId, bool toReplace, int reason, const std::string& text);
-	void deliver(const std::string& clientCompId, Outbound msg);
+	void deliver(const std::string& clientCompId, Outbound msg, const OrderRecord* order = nullptr);
+	void addClOrdId(OrderRecord& order, const std::string& clOrdId);
+	void save(const OrderRecord& order);
 	void flush(const std::string& clientCompId);
 	void finishResyncIfDone();
 	void reconcile();
@@ -129,7 +134,9 @@ class IbOrderHandler : public OrderRequestHandler,
 	std::string defaultAccount_;
 	std::unordered_map<int, OrderRecord> orders_;                  // by TWS order id
 	std::map<std::pair<std::string, std::string>, int> clOrdIds_;  // (client, ClOrdID) -> TWS order id
-	std::unordered_map<std::string, std::deque<Outbound>> undelivered_;
+	std::unordered_map<std::string, std::deque<Queued>> undelivered_;
+	OrderJournal* journal_ = nullptr;
+	std::function<void(const std::string&)> log_;
 	// catching up after a (re)connect
 	bool resyncing_ = false;
 	bool resyncExecutionsDone_ = false;

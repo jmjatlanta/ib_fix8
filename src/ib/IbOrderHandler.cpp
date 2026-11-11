@@ -59,11 +59,6 @@ std::string twsErrorText(int errorCode, const std::string& message)
 
 } // namespace
 
-bool IbOrderHandler::OrderRecord::isTerminal() const
-{
-	return ordStatus == fv::OrdStatusFilled || ordStatus == fv::ExecCanceled || ordStatus == fv::ExecRejected;
-}
-
 IbOrderHandler::IbOrderHandler(GatewayConnector& connector)
 		: connector_(connector), execIdPrefix_(makeExecIdPrefix())
 {
@@ -81,6 +76,34 @@ void IbOrderHandler::setResponder(OrderResponder* responder)
 {
 	std::scoped_lock lock(mutex_);
 	responder_ = responder;
+}
+
+void IbOrderHandler::setJournal(OrderJournal* journal)
+{
+	std::scoped_lock lock(mutex_);
+	journal_ = journal;
+}
+
+void IbOrderHandler::setLog(std::function<void(const std::string&)> log)
+{
+	std::scoped_lock lock(mutex_);
+	log_ = std::move(log);
+}
+
+size_t IbOrderHandler::recover(const std::vector<OrderRecord>& orders)
+{
+	std::scoped_lock lock(mutex_);
+	size_t working = 0;
+	for (const OrderRecord& saved : orders)
+	{
+		OrderRecord& order = orders_[saved.ibOrderId];
+		order = saved;
+		for (const auto& clOrdId : order.clOrdIds)
+			clOrdIds_[{ order.clientCompId, clOrdId }] = order.ibOrderId;
+		if (!order.isTerminal())
+			++working;
+	}
+	return working;
 }
 
 void IbOrderHandler::setDefaultAccount(const std::string& account)
@@ -122,8 +145,8 @@ void IbOrderHandler::onNewOrder(const std::string& clientCompId, const NewOrderR
 	order.clientCompId = clientCompId;
 	order.ibOrderId = ibOrderId;
 	order.terms = request;
-	clOrdIds_[{ clientCompId, request.clOrdId }] = ibOrderId;
-	deliver(clientCompId, report(order, fv::ExecPendingNew));
+	addClOrdId(order, request.clOrdId);
+	deliver(clientCompId, report(order, fv::ExecPendingNew), &order);
 }
 
 void IbOrderHandler::onCancel(const std::string& clientCompId, const CancelRequest& request)
@@ -147,7 +170,8 @@ void IbOrderHandler::onCancel(const std::string& clientCompId, const CancelReque
 		return cancelReject(clientCompId, order, request.clOrdId, request.origClOrdId, false,
 				fv::CxlRejBrokerOption, "Not connected to TWS");
 	order->pending = PendingChange{ false, request.clOrdId, {} };
-	clOrdIds_[{ clientCompId, request.clOrdId }] = order->ibOrderId;
+	addClOrdId(*order, request.clOrdId);
+	save(*order); // the client knows it asked
 }
 
 void IbOrderHandler::onReplace(const std::string& clientCompId, const ReplaceRequest& original)
@@ -182,7 +206,8 @@ void IbOrderHandler::onReplace(const std::string& clientCompId, const ReplaceReq
 	if (!connector_.placeOrder(order->ibOrderId, ib.result->contract, ib.result->order))
 		return rejectReplace(fv::CxlRejBrokerOption, "Not connected to TWS");
 	order->pending = PendingChange{ true, request.clOrdId, request };
-	clOrdIds_[{ clientCompId, request.clOrdId }] = order->ibOrderId;
+	addClOrdId(*order, request.clOrdId);
+	save(*order); // the client knows it asked
 }
 
 void IbOrderHandler::onLogon(const std::string& clientCompId)
@@ -212,7 +237,7 @@ void IbOrderHandler::OnOrderStatus(int orderId, const std::string& status, Decim
 			if (order.ordStatus == fv::ExecPendingNew)
 			{
 				order.ordStatus = fv::ExecNew;
-				deliver(order.clientCompId, report(order, fv::ExecNew));
+				deliver(order.clientCompId, report(order, fv::ExecNew), &order);
 			}
 		}
 	}
@@ -228,7 +253,7 @@ void IbOrderHandler::OnOrderStatus(int orderId, const std::string& status, Decim
 			canceled.origClOrdId = canceled.clOrdId;
 			canceled.clOrdId = pending->clOrdId;
 		}
-		deliver(order.clientCompId, canceled);
+		deliver(order.clientCompId, canceled, &order);
 		if (pending && pending->isReplace)
 			cancelReject(order.clientCompId, &order, pending->clOrdId, order.terms.clOrdId, true, fv::CxlRejTooLate,
 					"Order was canceled");
@@ -240,7 +265,7 @@ void IbOrderHandler::OnOrderStatus(int orderId, const std::string& status, Decim
 		ExecutionReport rejected = report(order, fv::ExecRejected);
 		rejected.ordRejReason = fv::OrdRejBrokerOption;
 		rejected.text = whyHeld.empty() ? "Order inactive in TWS" : "Order inactive in TWS: " + whyHeld;
-		deliver(order.clientCompId, rejected);
+		deliver(order.clientCompId, rejected, &order);
 	}
 	// PendingSubmit, PendingCancel, ApiPending: nothing to report. Filled: reported from execDetails.
 }
@@ -272,7 +297,7 @@ void IbOrderHandler::OnOpenOrder(int orderId, const Contract&, const ::Order& ib
 	order.ordStatus = order.cumQty > 0.0 ? fv::OrdStatusPartiallyFilled : fv::ExecNew;
 	ExecutionReport replaced = report(order, fv::ExecReplaced);
 	replaced.origClOrdId = origClOrdId;
-	deliver(order.clientCompId, replaced);
+	deliver(order.clientCompId, replaced, &order);
 }
 
 void IbOrderHandler::OnExecDetails(int, const Contract&, const Execution& execution)
@@ -295,7 +320,7 @@ void IbOrderHandler::OnExecDetails(int, const Contract&, const Execution& execut
 	fill.execId = execution.execId;
 	fill.lastShares = toDouble(execution.shares);
 	fill.lastPx = execution.price;
-	deliver(order.clientCompId, fill);
+	deliver(order.clientCompId, fill, &order);
 
 	if (filled && order.pending)
 	{
@@ -332,7 +357,7 @@ void IbOrderHandler::onOrderError(int orderId, int errorCode, const std::string&
 		ExecutionReport rejected = report(order, fv::ExecRejected);
 		rejected.ordRejReason = fv::OrdRejBrokerOption;
 		rejected.text = text;
-		deliver(order.clientCompId, rejected);
+		deliver(order.clientCompId, rejected, &order);
 	}
 	// errors on a working order with nothing pending (e.g. a TWS warning we do not know) are not
 	// reported; the order's status updates still are
@@ -393,6 +418,13 @@ void IbOrderHandler::finishResyncIfDone()
 
 void IbOrderHandler::reconcile()
 {
+	size_t unknown = 0;
+	for (int ibOrderId : openInTws_)
+		if (orders_.count(ibOrderId) == 0)
+			++unknown;
+	if (unknown > 0 && log_)
+		log_(std::to_string(unknown) + " order(s) open in TWS under this API client id are not known to the gateway "
+			"(not in its order journal); they are left alone");
 	for (auto& [ibOrderId, order] : orders_)
 	{
 		if (order.isTerminal())
@@ -410,7 +442,7 @@ void IbOrderHandler::reconcile()
 				canceled.origClOrdId = canceled.clOrdId;
 				canceled.clOrdId = pending->clOrdId;
 			}
-			deliver(order.clientCompId, canceled);
+			deliver(order.clientCompId, canceled, &order);
 			if (pending && pending->isReplace)
 				cancelReject(order.clientCompId, &order, pending->clOrdId, order.terms.clOrdId, true,
 						fv::CxlRejTooLate, "Order is no longer open in TWS");
@@ -430,7 +462,7 @@ void IbOrderHandler::reconcile()
 // helpers (mutex_ held)
 // ---------------------------------------------------------------------------------------------
 
-IbOrderHandler::OrderRecord* IbOrderHandler::find(const std::string& clientCompId, const std::string& clOrdId)
+OrderRecord* IbOrderHandler::find(const std::string& clientCompId, const std::string& clOrdId)
 {
 	auto it = clOrdIds_.find({ clientCompId, clOrdId });
 	if (it == clOrdIds_.end())
@@ -492,14 +524,32 @@ void IbOrderHandler::cancelReject(const std::string& clientCompId, const OrderRe
 	r.cxlRejResponseTo = toReplace ? fv::CxlRejToReplace : fv::CxlRejToCancel;
 	r.cxlRejReason = reason;
 	r.text = text;
-	deliver(clientCompId, r);
+	deliver(clientCompId, r, order);
 }
 
-void IbOrderHandler::deliver(const std::string& clientCompId, Outbound msg)
+void IbOrderHandler::deliver(const std::string& clientCompId, Outbound msg, const OrderRecord* order)
 {
 	// queue behind anything already waiting, so the client sees reports in order
-	undelivered_[clientCompId].push_back(std::move(msg));
+	Queued queued{ std::move(msg), std::nullopt };
+	if (order != nullptr)
+		queued.snapshot = *order;
+	undelivered_[clientCompId].push_back(std::move(queued));
 	flush(clientCompId);
+}
+
+void IbOrderHandler::addClOrdId(OrderRecord& order, const std::string& clOrdId)
+{
+	clOrdIds_[{ order.clientCompId, clOrdId }] = order.ibOrderId;
+	order.clOrdIds.push_back(clOrdId);
+}
+
+void IbOrderHandler::save(const OrderRecord& order)
+{
+	if (journal_ == nullptr)
+		return;
+	OrderRecord saved = order;
+	saved.updated = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+	journal_->append(saved);
 }
 
 void IbOrderHandler::flush(const std::string& clientCompId)
@@ -516,9 +566,11 @@ void IbOrderHandler::flush(const std::string& clientCompId)
 				return responder_->sendExecutionReport(clientCompId, m);
 			else
 				return responder_->sendCancelReject(clientCompId, m);
-		}, queue.front());
+		}, queue.front().msg);
 		if (!sent)
 			return; // client not logged on: keep the rest for onLogon
+		if (queue.front().snapshot)
+			save(*queue.front().snapshot);
 		queue.pop_front();
 	}
 	undelivered_.erase(it);

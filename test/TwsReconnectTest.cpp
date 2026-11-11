@@ -48,7 +48,6 @@ class TwsReconnectTest : public ::testing::Test
 		restingPrice = settings.testValues.count("test.resting_price") ? std::stod(settings.testValues.at("test.resting_price")) : 1.0;
 
 		proxy = std::make_unique<TcpProxy>(settings.host, settings.port);
-		EngineConfig config;
 		config.tws = settings;
 		config.tws.host = "127.0.0.1";
 		config.tws.port = proxy->port();
@@ -60,6 +59,7 @@ class TwsReconnectTest : public ::testing::Test
 		fixPort = freeTcpPort();
 		config.fixConfigFile = writeAcceptorConfig(dir, fixPort);
 		config.fixGlobalLogFile = dir / "fix8_global.log";
+		config.orderJournalFile = dir / "orders.journal";
 		config.log = [this](const std::string& m) {
 			std::cout << "engine: " << m << std::endl;
 			std::scoped_lock lock(logMutex);
@@ -194,6 +194,23 @@ class TwsReconnectTest : public ::testing::Test
 		return false;
 	}
 
+	/// stop the engine as the gateway does on Ctrl-C, and start a new one with the same settings
+	void restartEngine()
+	{
+		if (client)
+			client->logout();
+		client.reset();
+		engine.reset();
+		engine = std::make_unique<Engine>(config);
+	}
+
+	void connectClient()
+	{
+		client = std::make_unique<TestClient>(dir, fixPort, "RECONNECT");
+		ASSERT_TRUE(client->logon());
+	}
+
+	EngineConfig config;
 	std::mutex logMutex;
 	std::vector<std::string> logs;
 	std::filesystem::path dir;
@@ -228,7 +245,6 @@ TEST_F(TwsReconnectTest, FillMissedWhileCutOffIsReportedAfterReconnecting)
 
 	// the held-back reports are lost with the connection
 	proxy->dropConnections(true);
-	proxy->setForwardingFromServer(true);
 	ASSERT_TRUE(waitUntil([&]() { return !engine->isTwsConnected(); }, 10s));
 	ASSERT_TRUE(waitUntil([&]() { return engine->isTwsConnected(); }, 30s)) << "engine did not reconnect";
 
@@ -251,5 +267,59 @@ TEST_F(TwsReconnectTest, FillMissedWhileCutOffIsReportedAfterReconnecting)
 	const std::string sell = newId("mkt-sell");
 	auto* msg = order(sell, fv::SideSell, fv::OrdTypeMarket, std::nullopt);
 	client->send(msg);
+	ASSERT_TRUE(report(sell, fv::ExecFill, 30s).has_value()) << "position of 1 " << symbol << " may need closing by hand";
+}
+
+TEST_F(TwsReconnectTest, RestingOrderIsManagedAfterARestart)
+{
+	const std::string resting = newId("restart-rest");
+	client->send(order(resting, fv::SideBuy, fv::OrdTypeLimit, restingPrice));
+	ASSERT_TRUE(report(resting, fv::ExecNew).has_value()) << "resting order not acknowledged";
+
+	restartEngine();
+	EXPECT_TRUE(logged("still working")) << "the journal was not loaded";
+	connectClient();
+	// the catch-up finds it still open in TWS: not reported canceled
+	EXPECT_FALSE(report(resting, fv::ExecCanceled, 3s).has_value());
+
+	// the strategy cancels it by its ClOrdID, as if the gateway had never stopped
+	const std::string cxl = newId("restart-cxl");
+	client->send(cancel(cxl, resting));
+	auto canceled = anyFor(cxl);
+	ASSERT_TRUE(canceled.has_value()) << "no answer to the cancel after the restart";
+	EXPECT_EQ(canceled->field(150), "4") << text(*canceled);
+	EXPECT_EQ(canceled->field(41), resting);
+}
+
+TEST_F(TwsReconnectTest, FillWhileTheGatewayIsDownIsReportedAfterARestart)
+{
+	// TWS's reports for this order never reach the gateway before it stops
+	proxy->setForwardingFromServer(false);
+	const std::string buy = newId("restart-mkt");
+	client->send(order(buy, fv::SideBuy, fv::OrdTypeMarket, std::nullopt));
+	ASSERT_TRUE(report(buy, fv::ExecPendingNew, 5s).has_value());
+	std::this_thread::sleep_for(5s); // TWS fills it, if the market is open
+
+	proxy->dropConnections(true);
+	restartEngine();
+	connectClient();
+
+	auto fill = report(buy, fv::ExecFill, 20s);
+	if (!fill)
+	{
+		const std::string cxl = newId("restart-mkt-cxl");
+		client->send(cancel(cxl, buy));
+		auto canceled = anyFor(cxl);
+		if (canceled && canceled->field(150) == "4")
+			GTEST_SKIP() << "market order was not filled (market closed?); it has been canceled";
+		FAIL() << "market order neither filled nor canceled after the restart: " << (canceled ? text(*canceled) : "no answer");
+	}
+	EXPECT_FALSE(fill->field(17).empty()) << "TWS ExecID";
+	EXPECT_EQ(std::stod(fill->field(14)), 1.0);
+	EXPECT_EQ(std::stod(fill->field(151)), 0.0);
+	EXPECT_FALSE(report(buy, fv::ExecFill, 2s).has_value()) << "fill reported twice";
+
+	const std::string sell = newId("restart-sell");
+	client->send(order(sell, fv::SideSell, fv::OrdTypeMarket, std::nullopt));
 	ASSERT_TRUE(report(sell, fv::ExecFill, 30s).has_value()) << "position of 1 " << symbol << " may need closing by hand";
 }

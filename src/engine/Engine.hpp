@@ -7,17 +7,18 @@
 
 namespace ib_fix {
 
-namespace ib { class GatewayConnector; class IbOrderHandler; }
+namespace ib { class GatewayConnector; class IbOrderHandler; class OrderJournal; }
 namespace fix42 { class Acceptor; }
 
 class Engine
 {
 	public:
 	/***
-	 * Connects to TWS, then starts accepting FIX connections. Returns once both are running.
+	 * Connects to TWS, takes back the orders in the order journal (if configured), then starts
+	 * accepting FIX connections and catches up with TWS. Returns once both are running.
 	 * @throws std::runtime_error if TWS cannot be reached within config.twsConnectTimeout, the
-	 *         default account is not one of TWS's accounts, or the FIX acceptor cannot start
-	 *         (bad configuration, port in use)
+	 *         default account is not one of TWS's accounts, the order journal cannot be read,
+	 *         or the FIX acceptor cannot start (bad configuration, port in use)
 	 */
 	explicit Engine(const EngineConfig& config);
 	/// logs out the FIX clients, stops accepting connections and disconnects from TWS
@@ -38,6 +39,7 @@ class Engine
 
 	EngineConfig config_;
 	std::unique_ptr<ib::GatewayConnector> connector_;
+	std::unique_ptr<ib::OrderJournal> journal_;
 	std::unique_ptr<ib::IbOrderHandler> handler_;
 	std::unique_ptr<fix42::Acceptor> acceptor_;
 };

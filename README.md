@@ -100,6 +100,7 @@ Relative paths are relative to this file.
 | `connect_timeout_seconds` | 10 | how long to wait for TWS to accept the connection |
 | `reconnect` | true | reconnect automatically when the connection to TWS is lost |
 | `reconnect_max_interval_seconds` | 30 | longest wait between reconnection attempts (1 s, 2 s, 4 s, ... up to this) |
+| `order_journal` | (none) | file where order state is saved, so that after a restart the gateway takes back its orders still working in TWS (step 6). The sample uses `run/orders.journal`. Without it a restarted gateway does not know its earlier orders |
 | `fix_config` | (required) | the FIX8 XML file |
 | `fix_session` | IBFIX | the `<session>` in that file to run |
 | `fix_global_log` | (FIX8 default) | FIX8's process-wide log file |
@@ -174,8 +175,19 @@ the gateway and its config file, `WorkingDirectory` set to the deployment direct
   confirm is rejected so the strategy can resend it. Error 1100 (TWS lost its own connection to
   IB) also blocks orders until TWS reports the connection restored.
 * **Strategies disconnecting.** Their orders keep working. Reports produced while a strategy is
-  logged out are queued and sent, in order, when it logs on again (in memory: lost if the
-  gateway stops).
+  logged out are queued and sent, in order, when it logs on again.
+* **Gateway restarts.** With `order_journal` set, each order's state is saved as its strategy is
+  told about it (owner, ClOrdIDs, terms, status, filled quantity, TWS ExecIDs reported, any
+  pending cancel or replace). On start-up the gateway loads the journal and catches up with TWS
+  exactly as after a reconnect, so each strategy is told, when it logs on, about fills, cancels
+  and unconfirmed requests from while the gateway was down; fills it already had are not
+  repeated. Recovered orders are cancelled and replaced by ClOrdID as before, and their ClOrdIDs
+  stay in use. Delivery is at least once: a report sent just before a crash but not yet saved is
+  sent again after the restart, with the same ExecID. Keep `client_id` unchanged between runs
+  (TWS only reports the orders and executions of the same API client id) and do not run two
+  gateways on one journal. On loading, the journal is compacted and orders that finished before
+  today are dropped; orders open in TWS under the client id but missing from the journal are
+  reported in the log and left alone.
 * **One session per CompID.** A second Logon with a SenderCompID that is already logged on is
   refused.
 * **Logs.** Gateway messages on standard output; per-strategy FIX session and protocol logs and
@@ -208,7 +220,8 @@ TWS's own ExecID (17).
 `build/test/ib_fix_tws_tests` sends real orders through the gateway's components to a TWS
 **paper trading** session: limit orders far from the market (placed, replaced, canceled), an
 unknown symbol, and, while the market is open, a one-share market order that is then sold again;
-it also cuts the TWS connection through a proxy to check reconnection. It refuses to trade unless
+it also cuts the TWS connection through a proxy to check reconnection, and restarts the engine to
+check that its orders are recovered. It refuses to trade unless
 every account is a paper account. See `test/test_resources/README.md` for its settings
 (`test/test_resources/tws_paper.cfg`, default 127.0.0.1:7497).
 
@@ -224,9 +237,8 @@ every account is a paper account. See `test/test_resources/README.md` for its se
 
 * Stocks only (SecurityType CS); futures and options need more FIX fields decoded. No GTD
   orders (TimeInForce 6).
-* The order book is in memory: after a gateway restart, orders still working in TWS are not
-  matched back to their strategies and ClOrdIDs, and queued reports for logged-out strategies
-  are lost.
+* Restart recovery relies on TWS's executions for the current day: fills from a previous day
+  that were never delivered (gateway down over midnight) are not recovered.
 * If TWS is not reachable when the gateway starts, it exits (reconnection only applies once the
   first connection has succeeded); use the service manager's restart.
 * No install target: deploy from the build directory (see step 2).

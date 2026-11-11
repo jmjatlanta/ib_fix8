@@ -3,6 +3,7 @@
 #include "fix/Fix42Codec.hpp"
 #include "ib/GatewayConnector.hpp"
 #include "ib/IbOrderHandler.hpp"
+#include "ib/OrderJournal.hpp"
 #include <algorithm>
 #include <stdexcept>
 #include <thread>
@@ -70,6 +71,20 @@ Engine::Engine(const EngineConfig& config) : config_(config)
 
 		handler_ = std::make_unique<ib::IbOrderHandler>(*connector_);
 		handler_->setDefaultAccount(tws.account);
+		handler_->setLog([this](const std::string& m) { log("Warning: " + m); });
+		if (!config_.orderJournalFile.empty())
+		{
+			journal_ = std::make_unique<ib::OrderJournal>(config_.orderJournalFile);
+			const ib::OrderJournal::Contents saved = journal_->load();
+			if (saved.unreadableLines > 0)
+				log("Warning: skipped " + std::to_string(saved.unreadableLines) + " unreadable line(s) in the order journal");
+			const size_t working = handler_->recover(saved.orders);
+			handler_->setJournal(journal_.get());
+			log("Order journal " + config_.orderJournalFile.string() + ": " + std::to_string(saved.orders.size())
+				+ " order(s) from today, " + std::to_string(working) + " still working");
+		}
+		else
+			log("Warning: no order journal configured; after a restart the gateway will not know its earlier orders");
 		connector_->setListener(handler_.get());
 		connector_->setLog([this](const std::string& m) { log(m); });
 		if (config_.twsReconnect)
@@ -83,6 +98,9 @@ Engine::Engine(const EngineConfig& config) : config_(config)
 		acceptor_->start();
 		log("Accepting FIX 4.2 connections (" + config_.fixConfigFile.string() + ", session "
 			+ config_.fixSessionName + ")");
+		// bring recovered orders up to date: fills and cancels that happened while the gateway was
+		// not running are reported (to each strategy when it logs on)
+		handler_->onTwsConnected();
 	}
 	catch (...)
 	{
@@ -114,6 +132,7 @@ void Engine::shutdown()
 		handler_->setResponder(nullptr);
 	acceptor_.reset();
 	handler_.reset();
+	journal_.reset();
 	if (connector_)
 		connector_->disconnect();
 	connector_.reset();

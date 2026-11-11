@@ -20,6 +20,10 @@ struct EngineConfig
 	bool twsReconnect = true;
 	std::chrono::seconds twsReconnectMaxInterval{ 30 };
 
+	/// where order state is saved, so orders still working in TWS are picked up again after a
+	/// restart; empty: not saved (a restarted gateway does not know its earlier orders)
+	std::filesystem::path orderJournalFile;
+
 	/// FIX8 XML configuration for the FIX 4.2 acceptor, and the <session> in it to run
 	std::filesystem::path fixConfigFile;
 	std::string fixSessionName = "IBFIX";
@@ -37,6 +41,7 @@ struct EngineConfig
  *   connect_timeout_seconds          default 10
  *   reconnect                        true (default) or false
  *   reconnect_max_interval_seconds   default 30
+ *   order_journal                    file for order state (restart recovery); empty: none
  *   fix_config                       FIX8 acceptor XML (required)
  *   fix_session                      default IBFIX
  *   fix_global_log                   FIX8 global log file

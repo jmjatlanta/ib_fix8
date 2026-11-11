@@ -148,7 +148,7 @@ void TcpProxy::pump(Link& link)
 {
 	while (!link.drop)
 	{
-		pollfd fds[2] = { { link.clientFd, POLLIN, 0 }, { link.serverFd, short(forwardFromServer_ ? POLLIN : 0), 0 } };
+		pollfd fds[2] = { { link.clientFd, POLLIN, 0 }, { link.serverFd, short(link.holdBack ? 0 : POLLIN), 0 } };
 		if (::poll(fds, 2, 50) < 0)
 			break;
 		if (link.drop)
@@ -176,6 +176,13 @@ void TcpProxy::dropConnections(bool reset)
 		link->reset = reset;
 		link->drop = true; // the pump notices within 50 ms and closes both sides
 	}
+}
+
+void TcpProxy::setForwardingFromServer(bool forwarding)
+{
+	std::scoped_lock lock(linksMutex_);
+	for (auto& link : links_)
+		link->holdBack = !forwarding;
 }
 
 size_t TcpProxy::connectionCount() const

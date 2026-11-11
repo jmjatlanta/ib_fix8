@@ -38,6 +38,8 @@ EngineConfig loadEngineConfig(const std::filesystem::path& file)
 				throw std::runtime_error(where + ": reconnect_max_interval_seconds must be positive");
 			config.twsReconnectMaxInterval = std::chrono::seconds(seconds);
 		}
+		else if (key == "order_journal")
+			config.orderJournalFile = value.empty() ? std::filesystem::path() : resolve(value);
 		else if (key == "fix_config")
 			config.fixConfigFile = value.empty() ? std::filesystem::path() : resolve(value);
 		else if (key == "fix_session")

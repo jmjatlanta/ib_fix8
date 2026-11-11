@@ -3,6 +3,10 @@
 #include "engine/Engine.hpp"
 #include <gtest/gtest.h>
 #include <fstream>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 using namespace ib_fix;
 
@@ -31,6 +35,7 @@ TEST(EngineConfig, SampleGatewayConfig)
 	EXPECT_TRUE(std::filesystem::exists(c.fixConfigFile)) << c.fixConfigFile;
 	EXPECT_EQ(c.fixConfigFile.filename(), "acceptor.xml");
 	EXPECT_TRUE(c.twsReconnect);
+	EXPECT_EQ(c.orderJournalFile, file.parent_path() / "run" / "orders.journal");
 }
 
 TEST(EngineConfig, ResolvesPathsAgainstTheConfigFile)
@@ -47,6 +52,7 @@ TEST(EngineConfig, ResolvesPathsAgainstTheConfigFile)
 	EXPECT_EQ(c.fixSessionName, "GW");
 	EXPECT_EQ(c.fixGlobalLogFile, "/tmp/fix8.log");
 	EXPECT_TRUE(c.twsReconnect) << "reconnect is on by default";
+	EXPECT_TRUE(c.orderJournalFile.empty()) << "no journal unless configured";
 	EXPECT_EQ(c.twsReconnectMaxInterval, std::chrono::seconds(30));
 }
 
@@ -109,4 +115,30 @@ TEST(Engine, FailsWhenTwsCannotBeReached)
 	EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(10));
 	ASSERT_FALSE(messages.empty());
 	EXPECT_NE(messages.front().find("Connecting to TWS"), std::string::npos);
+}
+
+TEST(Engine, FailsWithinTheTimeoutWhenTwsAcceptsButNeverAnswers)
+{
+	// a "TWS" that takes the TCP connection (the kernel completes it from the listen backlog) and
+	// never says anything, like TWS waiting for someone to accept the connection in its dialog
+	const int silent = ::socket(AF_INET, SOCK_STREAM, 0);
+	sockaddr_in addr{};
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	socklen_t len = sizeof(addr);
+	ASSERT_EQ(::bind(silent, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+	ASSERT_EQ(::listen(silent, 4), 0);
+	ASSERT_EQ(::getsockname(silent, reinterpret_cast<sockaddr*>(&addr), &len), 0);
+
+	const auto dir = test_util::makeOutputDir("engine_silent_tws");
+	EngineConfig c;
+	c.tws.port = ntohs(addr.sin_port);
+	c.twsConnectTimeout = std::chrono::seconds(2);
+	c.fixConfigFile = test_util::writeAcceptorConfig(dir, test_util::freeTcpPort());
+	c.fixGlobalLogFile = dir / "fix8_global.log";
+
+	const auto start = std::chrono::steady_clock::now();
+	EXPECT_THROW(Engine engine(c), std::runtime_error);
+	EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(10)) << "connecting must not block";
+	::close(silent);
 }
