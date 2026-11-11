@@ -5,6 +5,7 @@
 #include "ib/GatewayConnector.hpp"
 #include "ib/IbOrderHandler.hpp"
 #include "ib/TwsSettings.hpp"
+#include "engine/Engine.hpp"
 #include <gtest/gtest.h>
 #include <cstdlib>
 #include <iostream>
@@ -342,4 +343,144 @@ TEST_F(TwsIntegrationTest, MarketOrderFillsAndPositionIsClosed)
 	auto sold = waitForExecType(sell, fv::ExecFill, std::chrono::duration_cast<std::chrono::milliseconds>(timeout + 10s));
 	ASSERT_TRUE(sold.has_value()) << "position of 1 " << symbol << " may need closing by hand";
 	EXPECT_EQ(std::stod(sold->field(14)), 1.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// the Engine, as ib_fix_gateway runs it, against TWS
+// ---------------------------------------------------------------------------------------------
+namespace {
+
+class EngineIntegrationTest : public ::testing::Test
+{
+	protected:
+	void SetUp() override
+	{
+		dir = makeOutputDir(std::string("engine_") + ::testing::UnitTest::GetInstance()->current_test_info()->name());
+		ib::TwsSettings tws;
+		try
+		{
+			tws = ib::loadTwsSettings(settingsFile());
+		}
+		catch (const std::exception& e)
+		{
+			FAIL() << e.what();
+		}
+		config.tws = tws;
+		config.tws.clientId = tws.clientId + 1; // not the id the other suite used
+		config.tws.account.clear();
+		config.twsConnectTimeout = std::chrono::seconds(10);
+		fixPort = freeTcpPort();
+		config.fixConfigFile = writeAcceptorConfig(dir, fixPort);
+		config.fixGlobalLogFile = dir / "fix8_global.log";
+		config.log = [](const std::string& m) { std::cout << "engine: " << m << std::endl; };
+		configuredAccount = tws.account;
+		symbol = tws.testValues.count("test.symbol") ? tws.testValues.at("test.symbol") : "AAPL";
+		restingPrice = tws.testValues.count("test.resting_price") ? std::stod(tws.testValues.at("test.resting_price")) : 1.0;
+	}
+
+	/// starts an engine without trading, to find out which accounts TWS has; skips if TWS is down
+	std::vector<std::string> paperAccounts()
+	{
+		std::vector<std::string> accounts;
+		try
+		{
+			Engine probe(config);
+			accounts = probe.twsAccounts();
+		}
+		catch (const std::exception& e)
+		{
+			if (std::string(e.what()).find("Could not connect") != std::string::npos)
+				skip = e.what();
+			else
+				ADD_FAILURE() << e.what();
+			return {};
+		}
+		for (const auto& a : accounts)
+			if (a.empty() || a[0] != 'D')
+			{
+				ADD_FAILURE() << "Refusing to trade: account " << a << " is not a paper trading account";
+				return {};
+			}
+		return accounts;
+	}
+
+	std::filesystem::path dir;
+	EngineConfig config;
+	int fixPort = 0;
+	std::string configuredAccount;
+	std::string symbol;
+	double restingPrice = 1.0;
+	std::string skip;
+};
+
+} // namespace
+
+TEST_F(EngineIntegrationTest, UnknownDefaultAccountIsRefused)
+{
+	const auto accounts = paperAccounts();
+	if (!skip.empty())
+		GTEST_SKIP() << skip;
+	ASSERT_FALSE(accounts.empty());
+
+	config.tws.account = "DU-NOT-AN-ACCOUNT";
+	try
+	{
+		Engine engine(config);
+		FAIL() << "expected the engine to refuse an unknown default account";
+	}
+	catch (const std::runtime_error& e)
+	{
+		EXPECT_NE(std::string(e.what()).find("is not one of the TWS accounts"), std::string::npos) << e.what();
+	}
+}
+
+TEST_F(EngineIntegrationTest, OrderWithoutAccountGoesToTheDefaultAccount)
+{
+	const auto accounts = paperAccounts();
+	if (!skip.empty())
+		GTEST_SKIP() << skip;
+	ASSERT_FALSE(accounts.empty());
+	// the configured account, else the first individual (DU) account
+	std::string account = configuredAccount;
+	for (const auto& a : accounts)
+		if (account.empty() && a.rfind("DU", 0) == 0)
+			account = a;
+	if (account.empty())
+		account = accounts.front();
+	config.tws.account = account;
+
+	Engine engine(config);
+	ASSERT_TRUE(engine.isTwsConnected());
+	TestClient client(dir, fixPort, "ENGINETEST");
+	ASSERT_TRUE(client.logon());
+	EXPECT_EQ(engine.loggedOnClients(), std::vector<std::string>{ "ENGINETEST" });
+
+	const std::string id = "eng-" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count());
+	auto* msg = new F42::NewOrderSingle; // no Account
+	*msg << new F42::ClOrdID(id) << new F42::HandlInst('1') << new F42::Symbol(symbol)
+		<< new F42::Side(fv::SideBuy) << new F42::TransactTime << new F42::OrderQty(1)
+		<< new F42::OrdType(fv::OrdTypeLimit) << new F42::Price(restingPrice);
+	client.send(msg);
+
+	auto isReport = [&](const std::string& clOrdId, const std::string& execType) {
+		return [=](const ReceivedMessage& m) { return m.msgType == "8" && m.field(11) == clOrdId && m.field(150) == execType; };
+	};
+	auto anyRejection = [&](const ReceivedMessage& m) { return m.msgType == "8" && m.field(150) == "8"; };
+	auto ack = client.session().received.waitFor(isReport(id, "0"), 20s);
+	if (!ack)
+	{
+		auto rejected = client.session().received.waitFor(anyRejection, 1ms);
+		FAIL() << "order not acknowledged" << (rejected ? ": " + describe(*rejected) : std::string());
+	}
+	EXPECT_EQ(ack->field(1), account);
+
+	auto* cxl = new F42::OrderCancelRequest;
+	*cxl << new F42::ClOrdID(id + "-cxl") << new F42::OrigClOrdID(id) << new F42::Symbol(symbol)
+		<< new F42::Side(fv::SideBuy) << new F42::TransactTime;
+	client.send(cxl);
+	EXPECT_TRUE(client.session().received.waitFor(isReport(id + "-cxl", "4"), 20s).has_value());
+
+	client.logout();
+	EXPECT_TRUE(waitUntil([&]() { return engine.loggedOnClients().empty(); }));
 }

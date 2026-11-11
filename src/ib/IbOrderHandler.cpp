@@ -83,6 +83,12 @@ void IbOrderHandler::setResponder(OrderResponder* responder)
 	responder_ = responder;
 }
 
+void IbOrderHandler::setDefaultAccount(const std::string& account)
+{
+	std::scoped_lock lock(mutex_);
+	defaultAccount_ = account;
+}
+
 size_t IbOrderHandler::undeliveredCount(const std::string& clientCompId) const
 {
 	std::scoped_lock lock(mutex_);
@@ -94,9 +100,12 @@ size_t IbOrderHandler::undeliveredCount(const std::string& clientCompId) const
 // requests from FIX clients
 // ---------------------------------------------------------------------------------------------
 
-void IbOrderHandler::onNewOrder(const std::string& clientCompId, const NewOrderRequest& request)
+void IbOrderHandler::onNewOrder(const std::string& clientCompId, const NewOrderRequest& original)
 {
 	std::scoped_lock lock(mutex_);
+	NewOrderRequest request = original;
+	if (request.account.empty())
+		request.account = defaultAccount_;
 	if (clOrdIdInUse(clientCompId, request.clOrdId))
 		return reject(clientCompId, request, fv::OrdRejDuplicateOrder, "Duplicate ClOrdID " + request.clOrdId);
 	Translation ib = toIb(request);
@@ -139,10 +148,13 @@ void IbOrderHandler::onCancel(const std::string& clientCompId, const CancelReque
 	connector_.CancelOrder(order->ibOrderId, OrderCancel{});
 }
 
-void IbOrderHandler::onReplace(const std::string& clientCompId, const ReplaceRequest& request)
+void IbOrderHandler::onReplace(const std::string& clientCompId, const ReplaceRequest& original)
 {
 	std::scoped_lock lock(mutex_);
+	ReplaceRequest request = original;
 	OrderRecord* order = find(clientCompId, request.origClOrdId);
+	if (order != nullptr && request.account.empty())
+		request.account = order->terms.account; // a replace keeps the order's account
 	auto rejectReplace = [&](int reason, const std::string& text) {
 		cancelReject(clientCompId, order, request.clOrdId, request.origClOrdId, true, reason, text);
 	};

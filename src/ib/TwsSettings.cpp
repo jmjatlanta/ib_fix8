@@ -15,7 +15,29 @@ std::string trim(const std::string& s)
 	return s.substr(first, last - first + 1);
 }
 
-int toInt(const std::string& value, const std::string& where)
+} // namespace
+
+void forEachSetting(const std::filesystem::path& file,
+		const std::function<void(const std::string& key, const std::string& value, const std::string& where)>& f)
+{
+	std::ifstream in(file);
+	if (!in)
+		throw std::runtime_error("Cannot read settings file " + file.string());
+	std::string line;
+	for (int lineNumber = 1; std::getline(in, line); ++lineNumber)
+	{
+		line = trim(line);
+		if (line.empty() || line[0] == '#')
+			continue;
+		const std::string where = file.string() + ":" + std::to_string(lineNumber);
+		const auto eq = line.find('=');
+		if (eq == std::string::npos)
+			throw std::runtime_error(where + ": expected 'key = value'");
+		f(trim(line.substr(0, eq)), trim(line.substr(eq + 1)), where);
+	}
+}
+
+int settingToInt(const std::string& value, const std::string& where)
 {
 	try
 	{
@@ -30,45 +52,41 @@ int toInt(const std::string& value, const std::string& where)
 	throw std::runtime_error(where + ": not a number: '" + value + "'");
 }
 
-} // namespace
+bool applyTwsSetting(TwsSettings& settings, const std::string& key, const std::string& value, const std::string& where)
+{
+	if (key == "host")
+		settings.host = value;
+	else if (key == "port")
+		settings.port = settingToInt(value, where);
+	else if (key == "client_id")
+		settings.clientId = settingToInt(value, where);
+	else if (key == "account")
+		settings.account = value;
+	else
+		return false;
+	return true;
+}
+
+void checkTwsSettings(const TwsSettings& settings, const std::string& source)
+{
+	if (settings.host.empty())
+		throw std::runtime_error(source + ": host is empty");
+	if (settings.port <= 0 || settings.port > 65535)
+		throw std::runtime_error(source + ": port out of range");
+}
 
 TwsSettings loadTwsSettings(const std::filesystem::path& file)
 {
-	std::ifstream in(file);
-	if (!in)
-		throw std::runtime_error("Cannot read TWS settings file " + file.string());
-
 	TwsSettings settings;
-	std::string line;
-	for (int lineNumber = 1; std::getline(in, line); ++lineNumber)
-	{
-		line = trim(line);
-		if (line.empty() || line[0] == '#')
-			continue;
-		const std::string where = file.string() + ":" + std::to_string(lineNumber);
-		const auto eq = line.find('=');
-		if (eq == std::string::npos)
-			throw std::runtime_error(where + ": expected 'key = value'");
-		const std::string key = trim(line.substr(0, eq));
-		const std::string value = trim(line.substr(eq + 1));
-
-		if (key == "host")
-			settings.host = value;
-		else if (key == "port")
-			settings.port = toInt(value, where);
-		else if (key == "client_id")
-			settings.clientId = toInt(value, where);
-		else if (key == "account")
-			settings.account = value;
-		else if (key.rfind("test.", 0) == 0)
+	forEachSetting(file, [&](const std::string& key, const std::string& value, const std::string& where) {
+		if (applyTwsSetting(settings, key, value, where))
+			return;
+		if (key.rfind("test.", 0) == 0)
 			settings.testValues[key] = value;
 		else
 			throw std::runtime_error(where + ": unknown setting '" + key + "'");
-	}
-	if (settings.host.empty())
-		throw std::runtime_error(file.string() + ": host is empty");
-	if (settings.port <= 0 || settings.port > 65535)
-		throw std::runtime_error(file.string() + ": port out of range");
+	});
+	checkTwsSettings(settings, file.string());
 	return settings;
 }
 

@@ -23,9 +23,11 @@ add_executable(ib_fix_tests
 	IbOrderHandlerTest.cpp
 	GatewayTest.cpp
 	TwsSettingsTest.cpp
+	EngineTest.cpp
 )
-target_link_libraries(ib_fix_tests PRIVATE ib_fix::fix_acceptor ib_fix::ib_bridge GTest::gtest_main)
+target_link_libraries(ib_fix_tests PRIVATE ib_fix::engine GTest::gtest_main)
 target_compile_definitions(ib_fix_tests PRIVATE
+	IB_FIX_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 	TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/test_output"
 	TEST_RESOURCES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_resources")
 gtest_discover_tests(ib_fix_tests)
@@ -39,7 +41,7 @@ add_executable(ib_fix_tws_tests
 	FixTestClient.cpp
 	TwsIntegrationTest.cpp
 )
-target_link_libraries(ib_fix_tws_tests PRIVATE ib_fix::fix_acceptor ib_fix::ib_bridge GTest::gtest_main)
+target_link_libraries(ib_fix_tws_tests PRIVATE ib_fix::engine GTest::gtest_main)
 target_compile_definitions(ib_fix_tws_tests PRIVATE
 	TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/test_output"
 	TEST_RESOURCES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_resources")

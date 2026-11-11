@@ -48,6 +48,9 @@ class IbOrderHandler : public OrderRequestHandler,
 
 	/// where reports are sent; until set, they are queued
 	void setResponder(OrderResponder* responder);
+	/// account for orders that do not specify one (Account, tag 1); empty: let TWS decide.
+	/// Logins with several accounts (e.g. an advisor's) reject orders without an account.
+	void setDefaultAccount(const std::string& account);
 
 	/// reports waiting for a client to log on
 	size_t undeliveredCount(const std::string& clientCompId) const;
@@ -110,6 +113,7 @@ class IbOrderHandler : public OrderRequestHandler,
 	ib_helper::IBConnector& connector_;
 	mutable std::mutex mutex_;
 	OrderResponder* responder_ = nullptr;
+	std::string defaultAccount_;
 	std::unordered_map<int, OrderRecord> orders_;                  // by TWS order id
 	std::map<std::pair<std::string, std::string>, int> clOrdIds_;  // (client, ClOrdID) -> TWS order id
 	std::unordered_map<std::string, std::deque<Outbound>> undelivered_;

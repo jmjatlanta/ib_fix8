@@ -371,6 +371,37 @@ TEST_F(IbOrderHandlerTest, ReportsForAnOfflineClientAreDeliveredAtLogon)
 	EXPECT_EQ(handler.undeliveredCount(Client), 0u);
 }
 
+TEST_F(IbOrderHandlerTest, DefaultAccountIsUsedWhenOrderHasNone)
+{
+	handler.setDefaultAccount("DU111");
+	handler.onNewOrder(Client, limitBuy("ord-1"));
+	NewOrderRequest explicitAccount = limitBuy("ord-2");
+	explicitAccount.account = "DU222";
+	handler.onNewOrder(Client, explicitAccount);
+
+	const auto placed = connector.placed();
+	ASSERT_EQ(placed.size(), 2u);
+	EXPECT_EQ(placed[0].order.account, "DU111");
+	EXPECT_EQ(placed[1].order.account, "DU222");
+	EXPECT_EQ(responder.reports[0].second.account, "DU111");
+}
+
+TEST_F(IbOrderHandlerTest, ReplaceWithoutAccountKeepsTheOrdersAccount)
+{
+	handler.setDefaultAccount("DU111");
+	NewOrderRequest order = limitBuy("ord-1");
+	order.account = "DU222";
+	handler.onNewOrder(Client, order);
+	status(connector.placed().back().orderId, "Submitted");
+
+	ReplaceRequest replace;
+	static_cast<NewOrderRequest&>(replace) = limitBuy("rep-1", 150);
+	replace.origClOrdId = "ord-1";
+	handler.onReplace(Client, replace);
+	ASSERT_EQ(connector.placed().size(), 2u);
+	EXPECT_EQ(connector.placed().back().order.account, "DU222");
+}
+
 TEST_F(IbOrderHandlerTest, CallbacksForUnknownOrdersAreIgnored)
 {
 	status(9999, "Submitted");
