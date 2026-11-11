@@ -48,5 +48,7 @@ set(FIX8_SCHEMAS FIX42)
 add_subdirectory(external/fix8)
 
 # ---------------------------------------------------------------------------------------------
+add_subdirectory(src)
+
 enable_testing()
 add_subdirectory(test)

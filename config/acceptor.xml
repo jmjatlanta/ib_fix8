@@ -1,0 +1,49 @@
+<?xml version='1.0' encoding='ISO-8859-1'?>
+<!--
+	Sample FIX8 configuration for the ib_fix FIX 4.2 acceptor.
+	Strategies connect as initiators with TargetCompID=IBFIX.
+	Paths are relative to the gateway's working directory; ./run must exist.
+-->
+<fix8>
+	<session name="IBFIX"
+				role="acceptor"
+				ip="127.0.0.1"
+				port="9878"
+				sender_comp_id="IBFIX"
+				heartbeat_interval="30"
+				process_model="threaded"
+				enforce_compids="true"
+				reset_sequence_numbers="false"
+				permissive_mode="false"
+				tcp_nodelay="true"
+				persist="file_persist"
+				session_log="session_log"
+				protocol_log="protocol_log"
+				active="true" />
+
+	<!-- uncomment and add client_group="strategies" to the session to accept only these CompIDs
+	<client_group name="strategies">
+		<client name="Strategy 1" target_comp_id="STRAT1" ip="127.0.0.1" />
+	</client_group>
+	-->
+
+	<!-- sequence numbers and sent messages, per client session, so they survive restarts -->
+	<persist name="file_persist"
+				type="file"
+				dir="./run"
+				use_session_id="true"
+				db="ib_fix" />
+
+	<log name="session_log"
+			type="session"
+			filename="./run/ib_fix_session.log"
+			rotation="5"
+			levels="info|warn|error|fatal"
+			flags="timestamp|sequence|thread|level" />
+
+	<log name="protocol_log"
+			type="protocol"
+			filename="./run/ib_fix_protocol.log"
+			rotation="5"
+			flags="append|direction|inbound|outbound" />
+</fix8>
