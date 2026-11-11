@@ -1,8 +1,8 @@
 [submodule "external/fix8"]
 	path = external/fix8
-	url = git@github.com:jmjatlanta/fix8
+	url = https://github.com/jmjatlanta/fix8.git
 	branch = subproject-support
 [submodule "external/ib_helper"]
 	path = external/ib_helper
-	url = git@github.com:jmjatlanta/ib_helper
+	url = https://github.com/jmjatlanta/ib_helper.git
 	branch = subproject-support
