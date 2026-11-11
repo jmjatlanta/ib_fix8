@@ -25,6 +25,8 @@ add_executable(ib_fix_tests
 	TwsSettingsTest.cpp
 	EngineTest.cpp
 	OrderJournalTest.cpp
+	PositionCheckTest.cpp
+	TwsPositions.cpp
 )
 target_link_libraries(ib_fix_tests PRIVATE ib_fix::engine GTest::gtest_main)
 target_compile_definitions(ib_fix_tests PRIVATE
@@ -41,6 +43,8 @@ option(IB_FIX_TWS_TESTS "Add the live TWS integration tests (they place paper or
 add_executable(ib_fix_tws_tests
 	FixTestClient.cpp
 	TcpProxy.cpp
+	TwsPositions.cpp
+	LivePositions.cpp
 	TwsIntegrationTest.cpp
 	TwsReconnectTest.cpp
 )
@@ -48,6 +52,10 @@ target_link_libraries(ib_fix_tws_tests PRIVATE ib_fix::engine GTest::gtest_main)
 target_compile_definitions(ib_fix_tws_tests PRIVATE
 	TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/test_output"
 	TEST_RESOURCES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_resources")
+# read-only: prints the positions in a stock (default: the tests' symbol) in every account
+add_executable(tws_positions tws_positions.cpp TwsPositions.cpp)
+target_link_libraries(tws_positions PRIVATE ib_fix::ib_bridge)
+target_compile_definitions(tws_positions PRIVATE TEST_RESOURCES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_resources")
 if(IB_FIX_TWS_TESTS)
 	add_test(NAME tws_integration COMMAND ib_fix_tws_tests)
 	set_tests_properties(tws_integration PROPERTIES LABELS tws TIMEOUT 600)

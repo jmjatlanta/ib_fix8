@@ -25,6 +25,11 @@ the engine was stopped is reported once. They use API client ids `client_id + 1`
 * They are not part of the default `ctest` run. Run them explicitly:
   `./build/test/ib_fix_tws_tests`, or configure with `-DIB_FIX_TWS_TESTS=ON` to add them to `ctest`.
 * If TWS is not reachable, the tests are skipped.
+* Every test reads the test symbol's positions in all accounts before it starts and checks, when
+  it ends (passed or failed), that they are the same again; a test that leaves a position behind
+  fails and says by how much. The program prints the positions when it starts, so a position left
+  by a run that was killed (where no check can run) shows up. `build/test/tws_positions [symbol]`
+  prints them at any time (read-only). The check uses API client id `client_id + 9`.
 
 ## TWS settings (File / Global Configuration / API / Settings)
 

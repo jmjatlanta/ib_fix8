@@ -1,6 +1,7 @@
 // Live reconnection tests: the Engine reaches TWS through a TcpProxy, which the tests use to cut
 // the connection. Needs a TWS paper trading session; see test/test_resources/README.md.
 #include "FixTestClient.hpp"
+#include "LivePositions.hpp"
 #include "TcpProxy.hpp"
 #include "engine/Engine.hpp"
 #include "ib/TwsSettings.hpp"
@@ -89,11 +90,19 @@ class TwsReconnectTest : public ::testing::Test
 		ASSERT_FALSE(account.empty());
 		config.tws.account = account;
 
+		std::string error;
+		TwsPositions* positions = livePositions(settings, error);
+		if (positions == nullptr)
+			FAIL() << "cannot check positions: " << error;
+		if (auto problem = positionCheck.begin(*positions, symbol); !problem.empty())
+			FAIL() << problem;
+
 		engine = std::make_unique<Engine>(config);
 		client = std::make_unique<TestClient>(dir, fixPort, "RECONNECT");
 		ASSERT_TRUE(client->logon());
 	}
 
+	/// runs whether the test passed or failed
 	void TearDown() override
 	{
 		if (client)
@@ -101,7 +110,11 @@ class TwsReconnectTest : public ::testing::Test
 		client.reset();
 		engine.reset();
 		proxy.reset();
+		if (auto problem = positionCheck.end(); !problem.empty())
+			ADD_FAILURE() << problem;
 	}
+
+	PositionCheck positionCheck;
 
 	std::string newId(const std::string& tag)
 	{

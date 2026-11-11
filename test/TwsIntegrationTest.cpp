@@ -1,6 +1,7 @@
 // Live integration tests: FIX 4.2 client -> Acceptor -> IbOrderHandler -> GatewayConnector -> TWS.
 // Needs a TWS paper trading session; see test/test_resources/README.md. Places real (paper) orders.
 #include "FixTestClient.hpp"
+#include "LivePositions.hpp"
 #include "fix/Acceptor.hpp"
 #include "ib/GatewayConnector.hpp"
 #include "ib/IbOrderHandler.hpp"
@@ -122,7 +123,22 @@ class TwsIntegrationTest : public ::testing::Test
 			FAIL() << setupProblem;
 		if (!skipReason.empty())
 			GTEST_SKIP() << skipReason;
+		std::string error;
+		TwsPositions* positions = livePositions(settings, error);
+		if (positions == nullptr)
+			FAIL() << "cannot check positions: " << error;
+		if (auto problem = positionCheck.begin(*positions, symbol); !problem.empty())
+			FAIL() << problem;
 	}
+
+	/// runs whether the test passed or failed
+	void TearDown() override
+	{
+		if (auto problem = positionCheck.end(); !problem.empty())
+			ADD_FAILURE() << problem;
+	}
+
+	PositionCheck positionCheck;
 
 	static std::string value(const std::string& key, const std::string& defaultValue)
 	{
@@ -376,7 +392,23 @@ class EngineIntegrationTest : public ::testing::Test
 		configuredAccount = tws.account;
 		symbol = tws.testValues.count("test.symbol") ? tws.testValues.at("test.symbol") : "AAPL";
 		restingPrice = tws.testValues.count("test.resting_price") ? std::stod(tws.testValues.at("test.resting_price")) : 1.0;
+
+		std::string error;
+		TwsPositions* positions = livePositions(tws, error);
+		if (positions == nullptr)
+			GTEST_SKIP() << error;
+		if (auto problem = positionCheck.begin(*positions, symbol); !problem.empty())
+			FAIL() << problem;
 	}
+
+	/// runs whether the test passed or failed
+	void TearDown() override
+	{
+		if (auto problem = positionCheck.end(); !problem.empty())
+			ADD_FAILURE() << problem;
+	}
+
+	PositionCheck positionCheck;
 
 	/// starts an engine without trading, to find out which accounts TWS has; skips if TWS is down
 	std::vector<std::string> paperAccounts()
