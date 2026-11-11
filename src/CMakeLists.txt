@@ -13,6 +13,7 @@ add_library(ib_bridge
 	ib/IbTranslation.cpp
 	ib/GatewayConnector.cpp
 	ib/IbOrderHandler.cpp
+	ib/TwsSettings.cpp
 )
 add_library(ib_fix::ib_bridge ALIAS ib_bridge)
 target_include_directories(ib_bridge PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

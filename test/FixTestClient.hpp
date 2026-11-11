@@ -46,6 +46,9 @@ class MessageQueue
 	void push(ReceivedMessage msg);
 	/// waits for (and removes) the first message of the given type
 	std::optional<ReceivedMessage> waitFor(const std::string& msgType, std::chrono::milliseconds timeout = 5000ms);
+	/// waits for (and removes) the first message that matches
+	std::optional<ReceivedMessage> waitFor(const std::function<bool(const ReceivedMessage&)>& match,
+			std::chrono::milliseconds timeout = 5000ms);
 	size_t size() const;
 
 	private:

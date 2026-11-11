@@ -119,11 +119,17 @@ void MessageQueue::push(ReceivedMessage msg)
 
 std::optional<ReceivedMessage> MessageQueue::waitFor(const std::string& msgType, std::chrono::milliseconds timeout)
 {
+	return waitFor([&](const ReceivedMessage& m) { return m.msgType == msgType; }, timeout);
+}
+
+std::optional<ReceivedMessage> MessageQueue::waitFor(const std::function<bool(const ReceivedMessage&)>& match,
+		std::chrono::milliseconds timeout)
+{
 	std::unique_lock lock(mutex_);
 	std::optional<ReceivedMessage> result;
 	cv_.wait_for(lock, timeout, [&]() {
 		for (auto it = messages_.begin(); it != messages_.end(); ++it)
-			if (it->msgType == msgType)
+			if (match(*it))
 			{
 				result = std::move(*it);
 				messages_.erase(it);

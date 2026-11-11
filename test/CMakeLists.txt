@@ -22,7 +22,28 @@ add_executable(ib_fix_tests
 	IbTranslationTest.cpp
 	IbOrderHandlerTest.cpp
 	GatewayTest.cpp
+	TwsSettingsTest.cpp
 )
 target_link_libraries(ib_fix_tests PRIVATE ib_fix::fix_acceptor ib_fix::ib_bridge GTest::gtest_main)
-target_compile_definitions(ib_fix_tests PRIVATE TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/test_output")
+target_compile_definitions(ib_fix_tests PRIVATE
+	TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/test_output"
+	TEST_RESOURCES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_resources")
 gtest_discover_tests(ib_fix_tests)
+
+# ---------------------------------------------------------------------------------------------
+# live integration tests against TWS (paper trading); they place orders, so they are not run
+# by ctest unless IB_FIX_TWS_TESTS is ON. See test_resources/README.md.
+# ---------------------------------------------------------------------------------------------
+option(IB_FIX_TWS_TESTS "Add the live TWS integration tests (they place paper orders) to ctest" OFF)
+add_executable(ib_fix_tws_tests
+	FixTestClient.cpp
+	TwsIntegrationTest.cpp
+)
+target_link_libraries(ib_fix_tws_tests PRIVATE ib_fix::fix_acceptor ib_fix::ib_bridge GTest::gtest_main)
+target_compile_definitions(ib_fix_tws_tests PRIVATE
+	TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/test_output"
+	TEST_RESOURCES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_resources")
+if(IB_FIX_TWS_TESTS)
+	add_test(NAME tws_integration COMMAND ib_fix_tws_tests)
+	set_tests_properties(tws_integration PROPERTIES LABELS tws TIMEOUT 600)
+endif()
