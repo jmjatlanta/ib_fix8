@@ -19,7 +19,10 @@ add_executable(ib_fix_tests
 	FixTestClient.cpp
 	Fix42CodecTest.cpp
 	AcceptorTest.cpp
+	IbTranslationTest.cpp
+	IbOrderHandlerTest.cpp
+	GatewayTest.cpp
 )
-target_link_libraries(ib_fix_tests PRIVATE ib_fix::fix_acceptor GTest::gtest_main)
+target_link_libraries(ib_fix_tests PRIVATE ib_fix::fix_acceptor ib_fix::ib_bridge GTest::gtest_main)
 target_compile_definitions(ib_fix_tests PRIVATE TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/test_output")
 gtest_discover_tests(ib_fix_tests)

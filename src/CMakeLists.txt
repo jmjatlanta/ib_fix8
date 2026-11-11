@@ -7,3 +7,13 @@ add_library(fix_acceptor
 add_library(ib_fix::fix_acceptor ALIAS fix_acceptor)
 target_include_directories(fix_acceptor PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fix_acceptor PUBLIC fix8::FIX42)
+
+# Interactive Brokers side: executes the FIX clients' orders through TWS
+add_library(ib_bridge
+	ib/IbTranslation.cpp
+	ib/GatewayConnector.cpp
+	ib/IbOrderHandler.cpp
+)
+add_library(ib_fix::ib_bridge ALIAS ib_bridge)
+target_include_directories(ib_bridge PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(ib_bridge PUBLIC fix_acceptor ib_helper::ib_helper)

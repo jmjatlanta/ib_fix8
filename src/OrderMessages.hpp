@@ -44,6 +44,13 @@ inline constexpr char CxlRejToReplace = '2';
 // CxlRejReason (102)
 inline constexpr int CxlRejTooLate = 0;
 inline constexpr int CxlRejUnknownOrder = 1;
+inline constexpr int CxlRejBrokerOption = 2;
+inline constexpr int CxlRejAlreadyPending = 3;
+// TimeInForce (59), continued
+inline constexpr char TifAtTheOpening = '2';
+// OrdStatus (39) values that are not also ExecType values in FIX 4.2
+inline constexpr char OrdStatusPartiallyFilled = '1';
+inline constexpr char OrdStatusFilled = '2';
 } // namespace fix_value
 
 /// NewOrderSingle (D)
