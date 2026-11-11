@@ -13,8 +13,12 @@ struct EngineConfig
 	/// TWS / IB Gateway connection. tws.account is the default account: it is used for orders
 	/// that do not specify Account (tag 1), and must be one of the accounts TWS reports.
 	ib::TwsSettings tws;
-	/// how long to wait for TWS to accept the connection
+	/// how long to wait for TWS to accept the connection (at start, and on each reconnect)
 	std::chrono::seconds twsConnectTimeout{ 10 };
+	/// reconnect automatically when the connection to TWS is lost, waiting 1s, 2s, 4s, ... up to
+	/// twsReconnectMaxInterval between attempts
+	bool twsReconnect = true;
+	std::chrono::seconds twsReconnectMaxInterval{ 30 };
 
 	/// FIX8 XML configuration for the FIX 4.2 acceptor, and the <session> in it to run
 	std::filesystem::path fixConfigFile;
@@ -31,6 +35,8 @@ struct EngineConfig
  *
  *   host, port, client_id, account   TWS connection and default account (see ib::TwsSettings)
  *   connect_timeout_seconds          default 10
+ *   reconnect                        true (default) or false
+ *   reconnect_max_interval_seconds   default 30
  *   fix_config                       FIX8 acceptor XML (required)
  *   fix_session                      default IBFIX
  *   fix_global_log                   FIX8 global log file

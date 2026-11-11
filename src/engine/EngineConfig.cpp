@@ -22,6 +22,22 @@ EngineConfig loadEngineConfig(const std::filesystem::path& file)
 				throw std::runtime_error(where + ": connect_timeout_seconds must be positive");
 			config.twsConnectTimeout = std::chrono::seconds(seconds);
 		}
+		else if (key == "reconnect")
+		{
+			if (value == "true" || value == "yes" || value == "1")
+				config.twsReconnect = true;
+			else if (value == "false" || value == "no" || value == "0")
+				config.twsReconnect = false;
+			else
+				throw std::runtime_error(where + ": reconnect must be true or false");
+		}
+		else if (key == "reconnect_max_interval_seconds")
+		{
+			const int seconds = ib::settingToInt(value, where);
+			if (seconds <= 0)
+				throw std::runtime_error(where + ": reconnect_max_interval_seconds must be positive");
+			config.twsReconnectMaxInterval = std::chrono::seconds(seconds);
+		}
 		else if (key == "fix_config")
 			config.fixConfigFile = value.empty() ? std::filesystem::path() : resolve(value);
 		else if (key == "fix_session")

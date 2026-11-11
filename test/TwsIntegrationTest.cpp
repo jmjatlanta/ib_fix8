@@ -88,7 +88,7 @@ class TwsIntegrationTest : public ::testing::Test
 		std::cout << "Placing test orders in account " << account << std::endl;
 
 		handler = std::make_unique<ib::IbOrderHandler>(*connector);
-		connector->setOrderErrorListener(handler.get());
+		connector->setListener(handler.get());
 		port = freeTcpPort();
 		acceptor = std::make_unique<fix42::Acceptor>(writeAcceptorConfig(dir, port).string(), "IBFIX", *handler);
 		handler->setResponder(acceptor.get());
@@ -106,7 +106,7 @@ class TwsIntegrationTest : public ::testing::Test
 		if (acceptor)
 			acceptor->stop();
 		if (connector)
-			connector->setOrderErrorListener(nullptr);
+			connector->setListener(nullptr);
 		if (handler)
 			handler->setResponder(nullptr);
 		acceptor.reset();

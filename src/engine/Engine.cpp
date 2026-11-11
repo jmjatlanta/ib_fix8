@@ -70,7 +70,13 @@ Engine::Engine(const EngineConfig& config) : config_(config)
 
 		handler_ = std::make_unique<ib::IbOrderHandler>(*connector_);
 		handler_->setDefaultAccount(tws.account);
-		connector_->setOrderErrorListener(handler_.get());
+		connector_->setListener(handler_.get());
+		connector_->setLog([this](const std::string& m) { log(m); });
+		if (config_.twsReconnect)
+		{
+			connector_->enableReconnect(config_.twsReconnectMaxInterval, config_.twsConnectTimeout);
+			log("Will reconnect to TWS automatically if the connection is lost");
+		}
 
 		acceptor_ = std::make_unique<fix42::Acceptor>(config_.fixConfigFile.string(), config_.fixSessionName, *handler_);
 		handler_->setResponder(acceptor_.get());
@@ -95,10 +101,15 @@ Engine::~Engine()
 void Engine::shutdown()
 {
 	// FIX side first, so clients are logged out while their last reports can still be sent
+	if (connector_)
+		connector_->stopReconnect();
 	if (acceptor_)
 		acceptor_->stop();
 	if (connector_)
-		connector_->setOrderErrorListener(nullptr);
+	{
+		connector_->setListener(nullptr);
+		connector_->setLog(nullptr);
+	}
 	if (handler_)
 		handler_->setResponder(nullptr);
 	acceptor_.reset();
@@ -110,7 +121,7 @@ void Engine::shutdown()
 
 bool Engine::isTwsConnected() const
 {
-	return connector_ && connector_->IsConnected();
+	return connector_ && connector_->isAvailable();
 }
 
 std::vector<std::string> Engine::twsAccounts() const

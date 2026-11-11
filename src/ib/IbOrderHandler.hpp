@@ -31,17 +31,23 @@ namespace ib_fix::ib {
  * One cancel or replace may be outstanding per order. Reports for a client that is not logged
  * on are queued (in memory) and delivered when it logs on again.
  *
+ * While TWS is not connected, new orders, cancels and replaces are rejected. Whenever the
+ * connection is (re)established the handler catches up: TWS's executions for the day are
+ * requested (fills missed while disconnected are reported; repeats are ignored) and so are this
+ * client's open orders. Afterwards, an order that is neither filled nor open in TWS is reported
+ * Canceled, and a cancel or replace still pending on an open order is rejected as unconfirmed.
+ *
  * Thread safety: FIX callbacks arrive on the sessions' reader threads, TWS callbacks on the
  * TWS reader thread; all state is guarded by one mutex.
  */
 class IbOrderHandler : public OrderRequestHandler,
 		public ib_helper::OrderHandler,
 		public ib_helper::ExecutionHandler,
-		public OrderErrorListener
+		public TwsEventListener
 {
 	public:
 	/// registers itself for the connector's order and execution callbacks
-	explicit IbOrderHandler(ib_helper::IBConnector& connector);
+	explicit IbOrderHandler(GatewayConnector& connector);
 	~IbOrderHandler() override;
 	IbOrderHandler(const IbOrderHandler&) = delete;
 	IbOrderHandler& operator=(const IbOrderHandler&) = delete;
@@ -66,14 +72,19 @@ class IbOrderHandler : public OrderRequestHandler,
 	void OnOrderStatus(int orderId, const std::string& status, Decimal filled, Decimal remaining,
 			double avgFillPrice, int permId, int parentId, double lastFillPrice, int clientId,
 			const std::string& whyHeld, double mktCapPrice) override;
-	void OnOpenOrderEnd() override {}
+	void OnOpenOrderEnd() override;
 	void OnOrderBound(long orderId, int apiClientId, int apiOrderId) override {}
 
 	// ib_helper::ExecutionHandler (from TWS)
 	void OnExecDetails(int reqId, const Contract& contract, const Execution& execution) override;
+	void OnExecDetailsEnd(int reqId) override;
 
-	// OrderErrorListener (from TWS, via GatewayConnector)
+	// TwsEventListener (from TWS, via GatewayConnector)
 	void onOrderError(int orderId, int errorCode, const std::string& message) override;
+	void onTwsConnected() override;
+	void onTwsDisconnected() override;
+	/// catching up with TWS after a (re)connect
+	bool isResyncing() const;
 
 	private:
 	struct PendingChange
@@ -109,14 +120,21 @@ class IbOrderHandler : public OrderRequestHandler,
 			const std::string& origClOrdId, bool toReplace, int reason, const std::string& text);
 	void deliver(const std::string& clientCompId, Outbound msg);
 	void flush(const std::string& clientCompId);
+	void finishResyncIfDone();
+	void reconcile();
 
-	ib_helper::IBConnector& connector_;
+	GatewayConnector& connector_;
 	mutable std::mutex mutex_;
 	OrderResponder* responder_ = nullptr;
 	std::string defaultAccount_;
 	std::unordered_map<int, OrderRecord> orders_;                  // by TWS order id
 	std::map<std::pair<std::string, std::string>, int> clOrdIds_;  // (client, ClOrdID) -> TWS order id
 	std::unordered_map<std::string, std::deque<Outbound>> undelivered_;
+	// catching up after a (re)connect
+	bool resyncing_ = false;
+	bool resyncExecutionsDone_ = false;
+	bool resyncOpenOrdersDone_ = false;
+	std::set<int> openInTws_;
 	const std::string execIdPrefix_;
 	uint64_t execIdCounter_ = 0;
 };

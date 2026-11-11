@@ -1,7 +1,7 @@
 #pragma once
 // Stands in for TWS: records the orders and cancels sent to it. Tests play TWS's side by calling
-// the handler's callbacks (OnOrderStatus, OnExecDetails, OnOpenOrder, onOrderError) directly.
-#include "IBConnector.hpp"
+// the handler's callbacks (OnOrderStatus, OnExecDetails, OnOpenOrder, onOrderError, ...) directly.
+#include "ib/GatewayConnector.hpp"
 #include "Decimal.h"
 #include "Execution.h"
 #include <mutex>
@@ -9,7 +9,7 @@
 
 namespace test_util {
 
-class FakeConnector : public ib_helper::IBConnector
+class FakeConnector : public ib_fix::ib::GatewayConnector
 {
 	public:
 	struct Placed
@@ -19,20 +19,33 @@ class FakeConnector : public ib_helper::IBConnector
 		::Order order;
 	};
 
-	FakeConnector() : ib_helper::IBConnector() {} // the protected constructor does not connect
+	FakeConnector() : ib_fix::ib::GatewayConnector() {} // the protected constructor does not connect
 
-	void PlaceOrder(int orderId, const Contract& contract, const ::Order& order) override
+	bool placeOrder(int orderId, const Contract& contract, const ::Order& order) override
 	{
+		if (!connected || failNextSend)
+			return failNextSend = false;
 		std::scoped_lock lock(mutex_);
 		placed_.push_back({ orderId, contract, order });
+		return true;
 	}
-	void CancelOrder(int orderId, const OrderCancel&) override
+	bool cancelOrder(int orderId) override
 	{
+		if (!connected || failNextSend)
+			return failNextSend = false;
 		std::scoped_lock lock(mutex_);
 		canceled_.push_back(orderId);
+		return true;
+	}
+	bool requestOrderRefresh() override
+	{
+		if (!connected)
+			return false;
+		++refreshRequests;
+		return true;
 	}
 	uint32_t GetNextOrderId() override { return ++nextId_; }
-	bool IsConnected() const override { return connected; }
+	bool isAvailable() const override { return connected; }
 
 	std::vector<Placed> placed() const
 	{
@@ -45,7 +58,10 @@ class FakeConnector : public ib_helper::IBConnector
 		return canceled_;
 	}
 
-	bool connected = true;
+	std::atomic<bool> connected = true;
+	/// the next placeOrder/cancelOrder fails as if the connection had just dropped
+	std::atomic<bool> failNextSend = false;
+	std::atomic<int> refreshRequests = 0;
 
 	private:
 	mutable std::mutex mutex_;

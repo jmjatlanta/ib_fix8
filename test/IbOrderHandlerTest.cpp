@@ -2,6 +2,7 @@
 #include "ib/IbOrderHandler.hpp"
 #include "OrderState.h"
 #include <gtest/gtest.h>
+#include <map>
 
 using namespace ib_fix;
 using namespace test_util;
@@ -400,6 +401,126 @@ TEST_F(IbOrderHandlerTest, ReplaceWithoutAccountKeepsTheOrdersAccount)
 	handler.onReplace(Client, replace);
 	ASSERT_EQ(connector.placed().size(), 2u);
 	EXPECT_EQ(connector.placed().back().order.account, "DU222");
+}
+
+TEST_F(IbOrderHandlerTest, OrderThatCannotBeSentIsRejectedAndItsClOrdIdIsFree)
+{
+	connector.failNextSend = true; // the connection drops between the check and the send
+	handler.onNewOrder(Client, limitBuy("ord-1"));
+	EXPECT_TRUE(connector.placed().empty());
+	EXPECT_EQ(lastReport().execType, fv::ExecRejected);
+	EXPECT_NE(lastReport().text.find("Not connected"), std::string::npos);
+
+	handler.onNewOrder(Client, limitBuy("ord-1"));
+	EXPECT_EQ(connector.placed().size(), 1u);
+	EXPECT_EQ(lastReport().execType, fv::ExecPendingNew);
+}
+
+TEST_F(IbOrderHandlerTest, CancelAndReplaceAreRejectedWhileTwsIsDown)
+{
+	placeAndAck("ord-1");
+	connector.connected = false;
+
+	handler.onCancel(Client, CancelRequest{ "cxl-1", "ord-1" });
+	EXPECT_EQ(lastCancelReject().cxlRejResponseTo, fv::CxlRejToCancel);
+	EXPECT_NE(lastCancelReject().text.find("Not connected"), std::string::npos);
+
+	ReplaceRequest replace;
+	static_cast<NewOrderRequest&>(replace) = limitBuy("rep-1", 150);
+	replace.origClOrdId = "ord-1";
+	handler.onReplace(Client, replace);
+	EXPECT_EQ(lastCancelReject().cxlRejResponseTo, fv::CxlRejToReplace);
+	EXPECT_TRUE(connector.canceled().empty());
+	EXPECT_EQ(connector.placed().size(), 1u);
+
+	// nothing was left pending: once TWS is back the order can be canceled
+	connector.connected = true;
+	handler.onCancel(Client, CancelRequest{ "cxl-2", "ord-1" });
+	EXPECT_EQ(connector.canceled().size(), 1u);
+}
+
+TEST_F(IbOrderHandlerTest, ReconnectCatchesUpWithTws)
+{
+	const int filledMeanwhile = placeAndAck("ord-filled");
+	const int stillOpen = placeAndAck("ord-open");
+	const int canceledMeanwhile = placeAndAck("ord-gone");
+	const int cancelPending = placeAndAck("ord-cxl");
+	handler.onCancel(Client, CancelRequest{ "cxl-1", "ord-cxl" });
+	const int replacePending = placeAndAck("ord-rep");
+	ReplaceRequest replace;
+	static_cast<NewOrderRequest&>(replace) = limitBuy("rep-1", 150);
+	replace.origClOrdId = "ord-rep";
+	handler.onReplace(Client, replace);
+	const auto placedBefore = connector.placed();
+	const size_t reportsBefore = responder.reports.size();
+
+	// connection lost and back: the handler asks TWS what happened
+	handler.onTwsDisconnected();
+	handler.onTwsConnected();
+	EXPECT_EQ(connector.refreshRequests, 1);
+	EXPECT_TRUE(handler.isResyncing());
+
+	// TWS replays today's executions (one missed, one repeated) ...
+	handler.OnExecDetails(1, Contract{}, makeExecution(filledMeanwhile, "exec-9", 100, 190.0, 100, 190.0));
+	handler.OnExecDetails(1, Contract{}, makeExecution(filledMeanwhile, "exec-9", 100, 190.0, 100, 190.0));
+	handler.OnExecDetailsEnd(1);
+	// ... and lists the orders still open (the replaced one still with its old terms)
+	for (int id : { stillOpen, cancelPending, replacePending })
+	{
+		const auto& p = placedBefore[0]; // contract/order contents do not matter here
+		handler.OnOpenOrder(id, p.contract, p.order, OrderState{});
+	}
+	handler.OnOpenOrderEnd();
+	EXPECT_FALSE(handler.isResyncing());
+
+	// the missed fill, exactly once
+	std::vector<ExecutionReport> reports;
+	for (size_t i = reportsBefore; i < responder.reports.size(); ++i)
+		reports.push_back(responder.reports[i].second);
+	ASSERT_EQ(reports.size(), 2u);
+	EXPECT_EQ(reports[0].clOrdId, "ord-filled");
+	EXPECT_EQ(reports[0].execType, fv::ExecFill);
+	// the order that vanished from TWS is reported canceled
+	EXPECT_EQ(reports[1].clOrdId, "ord-gone");
+	EXPECT_EQ(reports[1].execType, fv::ExecCanceled);
+	EXPECT_EQ(reports[1].orderId, std::to_string(canceledMeanwhile));
+	EXPECT_NE(reports[1].text.find("no longer open"), std::string::npos);
+	// the cancel and replace still pending on open orders are rejected as unconfirmed
+	ASSERT_GE(responder.cancelRejects.size(), 2u);
+	const auto& cxlReject = responder.cancelRejects[responder.cancelRejects.size() - 2].second;
+	const auto& repReject = responder.cancelRejects.back().second;
+	std::map<std::string, OrderCancelReject> byClOrdId{ { cxlReject.clOrdId, cxlReject }, { repReject.clOrdId, repReject } };
+	ASSERT_TRUE(byClOrdId.count("cxl-1"));
+	ASSERT_TRUE(byClOrdId.count("rep-1"));
+	EXPECT_EQ(byClOrdId["cxl-1"].cxlRejResponseTo, fv::CxlRejToCancel);
+	EXPECT_EQ(byClOrdId["rep-1"].cxlRejResponseTo, fv::CxlRejToReplace);
+	EXPECT_NE(byClOrdId["cxl-1"].text.find("Not confirmed"), std::string::npos);
+
+	// and they can be canceled again
+	handler.onCancel(Client, CancelRequest{ "cxl-2", "ord-cxl" });
+	EXPECT_EQ(connector.canceled().back(), cancelPending);
+}
+
+TEST_F(IbOrderHandlerTest, PendingCancelOfVanishedOrderIsConfirmedByCatchUp)
+{
+	const int id = placeAndAck("ord-1");
+	handler.onCancel(Client, CancelRequest{ "cxl-1", "ord-1" });
+	handler.onTwsConnected();
+	handler.OnExecDetailsEnd(1);
+	handler.OnOpenOrderEnd(); // ord-1 is not open any more: TWS canceled it while we were away
+	EXPECT_EQ(lastReport().execType, fv::ExecCanceled);
+	EXPECT_EQ(lastReport().clOrdId, "cxl-1");
+	EXPECT_EQ(lastReport().origClOrdId, "ord-1");
+	EXPECT_EQ(lastReport().orderId, std::to_string(id));
+}
+
+TEST_F(IbOrderHandlerTest, OpenOrderListOutsideCatchUpChangesNothing)
+{
+	placeAndAck("ord-1");
+	const size_t before = responder.reports.size();
+	handler.OnOpenOrderEnd(); // e.g. TWS's own open-order download
+	handler.OnExecDetailsEnd(7);
+	EXPECT_EQ(responder.reports.size(), before);
 }
 
 TEST_F(IbOrderHandlerTest, CallbacksForUnknownOrdersAreIgnored)

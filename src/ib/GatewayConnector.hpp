@@ -1,34 +1,94 @@
 #pragma once
-// ib_helper::IBConnector only passes connection errors (502, 509, 1100, 1102) to its monitors;
-// order errors such as 201 (order rejected) are only logged. This subclass also passes every
-// error that refers to a request id to an OrderErrorListener.
+// The gateway's connection to TWS / IB Gateway: an ib_helper::IBConnector that
+//  - passes order errors (e.g. 201, 161) and connection changes to a TwsEventListener;
+//    ib_helper only passes connection errors to its monitors
+//  - reconnects automatically when the connection is lost (enableReconnect)
+//  - only sends orders while connected, and says whether it did (placeOrder, cancelOrder)
 #include "IBConnector.hpp"
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
+#include <thread>
 
 namespace ib_fix::ib {
 
-class OrderErrorListener
+class TwsEventListener
 {
 	public:
-	virtual ~OrderErrorListener() = default;
+	virtual ~TwsEventListener() = default;
 	/// @param id the order (or request) id the error refers to; always > 0
 	virtual void onOrderError(int id, int errorCode, const std::string& message) = 0;
+	/// TWS accepted the connection (first connect or reconnect), or TWS's own connection to IB was
+	/// restored. Orders can be sent; what happened while disconnected should be requested.
+	virtual void onTwsConnected() {}
+	/// the connection to TWS was lost; orders cannot be sent until onTwsConnected
+	virtual void onTwsDisconnected() {}
 };
 
 class GatewayConnector : public ib_helper::IBConnector
 {
 	public:
-	/// connects to TWS / IB Gateway (see ib_helper::IBConnector)
-	using ib_helper::IBConnector::IBConnector;
-	void setOrderErrorListener(OrderErrorListener* listener) { listener_ = listener; }
+	/// starts connecting to TWS; IsConnected() becomes true once TWS has accepted the connection
+	GatewayConnector(const std::string& host, int port, int clientId);
+	~GatewayConnector() override;
+
+	void setListener(TwsEventListener* listener) { listener_ = listener; }
+	/// receives connection progress messages
+	void setLog(std::function<void(const std::string&)> log);
+
+	/***
+	 * Keep the connection up: when it is lost (or a connection attempt stalls for longer than
+	 * handshakeTimeout), disconnect and connect again, waiting 1s, 2s, 4s, ... up to maxInterval
+	 * between attempts.
+	 */
+	void enableReconnect(std::chrono::seconds maxInterval, std::chrono::seconds handshakeTimeout);
+	void stopReconnect();
+
+	/// connected to TWS, and TWS connected to IB
+	virtual bool isAvailable() const;
+	/// @return false, having sent nothing, if not available
+	virtual bool placeOrder(int orderId, const Contract& contract, const ::Order& order);
+	/// @return false, having sent nothing, if not available
+	virtual bool cancelOrder(int orderId);
+	/// request today's executions and this client's open orders (answered through the order and
+	/// execution handlers, ending with OnExecDetailsEnd and OnOpenOrderEnd)
+	/// @return false, having sent nothing, if not available
+	virtual bool requestOrderRefresh();
 
 	protected:
+	/// for test doubles: does not connect
+	GatewayConnector();
+
 	void error(int id, time_t errorTime, int errorCode, const std::string& errorString,
 			const std::string& advancedOrderRejectJson) override;
+	void nextValidId(OrderId orderId) override;
+	void connectionClosed() override;
 
 	private:
-	std::atomic<OrderErrorListener*> listener_ = nullptr;
+	void log(const std::string& message);
+	void markUnavailable(const std::string& reason);
+	void supervise(std::chrono::seconds maxInterval, std::chrono::seconds handshakeTimeout);
+	std::string address() const;
+
+	std::atomic<TwsEventListener*> listener_ = nullptr;
+	std::mutex logMutex_;
+	std::function<void(const std::string&)> log_;
+
+	// placeOrder etc. hold this shared; reconnecting takes it exclusively to wait for them to finish
+	mutable std::shared_mutex clientMutex_;
+	std::atomic<bool> available_ = false;       // connection accepted and not since lost
+	std::atomic<bool> ibConnected_ = true;      // TWS's own connection to IB (errors 1100 / 1101, 1102)
+	std::atomic<bool> socketFailed_ = false;    // error 509: the connection is broken
+	std::atomic<bool> notifiedConnected_ = false;
+
+	std::thread supervisor_;
+	std::mutex supervisorMutex_;
+	std::condition_variable supervisorWake_;
+	bool stopSupervisor_ = false;
 };
 
 } // namespace ib_fix::ib

@@ -25,6 +25,7 @@ class Engine
 	Engine(const Engine&) = delete;
 	Engine& operator=(const Engine&) = delete;
 
+	/// connected to TWS (and TWS to IB): orders can be sent
 	bool isTwsConnected() const;
 	/// accounts TWS reported at connection time
 	std::vector<std::string> twsAccounts() const;

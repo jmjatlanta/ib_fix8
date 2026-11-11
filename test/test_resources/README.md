@@ -9,6 +9,13 @@ order handler and TWS. They place, replace and cancel 1–2 share limit orders f
 market, check that an unknown symbol is rejected, and, while the market is open, buy one share
 at market and sell it again.
 
+The reconnection tests (`test/TwsReconnectTest.cpp`) put a small TCP proxy between the gateway
+and TWS and use it to close or reset the connection and to refuse new ones for a few seconds.
+They check that requests are refused while TWS is unreachable, that the gateway reconnects, that
+a resting order survives, and (while the market is open) that a fill whose reports were lost with
+the connection is reported after reconnecting. They use API client ids `client_id + 1` and
+`client_id + 2` as well as `client_id`.
+
 ## Safety
 
 * The tests only place orders if every account TWS reports is a paper account (ids starting

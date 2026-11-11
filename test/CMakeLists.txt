@@ -39,7 +39,9 @@ gtest_discover_tests(ib_fix_tests)
 option(IB_FIX_TWS_TESTS "Add the live TWS integration tests (they place paper orders) to ctest" OFF)
 add_executable(ib_fix_tws_tests
 	FixTestClient.cpp
+	TcpProxy.cpp
 	TwsIntegrationTest.cpp
+	TwsReconnectTest.cpp
 )
 target_link_libraries(ib_fix_tws_tests PRIVATE ib_fix::engine GTest::gtest_main)
 target_compile_definitions(ib_fix_tws_tests PRIVATE

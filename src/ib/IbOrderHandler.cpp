@@ -64,7 +64,7 @@ bool IbOrderHandler::OrderRecord::isTerminal() const
 	return ordStatus == fv::OrdStatusFilled || ordStatus == fv::ExecCanceled || ordStatus == fv::ExecRejected;
 }
 
-IbOrderHandler::IbOrderHandler(ib_helper::IBConnector& connector)
+IbOrderHandler::IbOrderHandler(GatewayConnector& connector)
 		: connector_(connector), execIdPrefix_(makeExecIdPrefix())
 {
 	connector_.AddOrderHandler(this);
@@ -111,19 +111,19 @@ void IbOrderHandler::onNewOrder(const std::string& clientCompId, const NewOrderR
 	Translation ib = toIb(request);
 	if (!ib.result)
 		return reject(clientCompId, request, fv::OrdRejBrokerOption, ib.error);
-	if (!connector_.IsConnected())
+	if (!connector_.isAvailable())
 		return reject(clientCompId, request, fv::OrdRejBrokerOption, "Not connected to TWS");
 
 	const int ibOrderId = static_cast<int>(connector_.GetNextOrderId());
+	// TWS callbacks for this order wait on mutex_, so they find the record complete
+	if (!connector_.placeOrder(ibOrderId, ib.result->contract, ib.result->order))
+		return reject(clientCompId, request, fv::OrdRejBrokerOption, "Not connected to TWS");
 	OrderRecord& order = orders_[ibOrderId];
 	order.clientCompId = clientCompId;
 	order.ibOrderId = ibOrderId;
 	order.terms = request;
 	clOrdIds_[{ clientCompId, request.clOrdId }] = ibOrderId;
-
 	deliver(clientCompId, report(order, fv::ExecPendingNew));
-	// TWS callbacks for this order wait on mutex_ until the record above is complete
-	connector_.PlaceOrder(ibOrderId, ib.result->contract, ib.result->order);
 }
 
 void IbOrderHandler::onCancel(const std::string& clientCompId, const CancelRequest& request)
@@ -143,9 +143,11 @@ void IbOrderHandler::onCancel(const std::string& clientCompId, const CancelReque
 		return cancelReject(clientCompId, order, request.clOrdId, request.origClOrdId, false,
 				fv::CxlRejBrokerOption, "Duplicate ClOrdID " + request.clOrdId);
 
+	if (!connector_.cancelOrder(order->ibOrderId))
+		return cancelReject(clientCompId, order, request.clOrdId, request.origClOrdId, false,
+				fv::CxlRejBrokerOption, "Not connected to TWS");
 	order->pending = PendingChange{ false, request.clOrdId, {} };
 	clOrdIds_[{ clientCompId, request.clOrdId }] = order->ibOrderId;
-	connector_.CancelOrder(order->ibOrderId, OrderCancel{});
 }
 
 void IbOrderHandler::onReplace(const std::string& clientCompId, const ReplaceRequest& original)
@@ -176,10 +178,11 @@ void IbOrderHandler::onReplace(const std::string& clientCompId, const ReplaceReq
 	if (!ib.result)
 		return rejectReplace(fv::CxlRejBrokerOption, ib.error);
 
+	// placing an order with an existing id modifies it
+	if (!connector_.placeOrder(order->ibOrderId, ib.result->contract, ib.result->order))
+		return rejectReplace(fv::CxlRejBrokerOption, "Not connected to TWS");
 	order->pending = PendingChange{ true, request.clOrdId, request };
 	clOrdIds_[{ clientCompId, request.clOrdId }] = order->ibOrderId;
-	// placing an order with an existing id modifies it
-	connector_.PlaceOrder(order->ibOrderId, ib.result->contract, ib.result->order);
 }
 
 void IbOrderHandler::onLogon(const std::string& clientCompId)
@@ -245,6 +248,8 @@ void IbOrderHandler::OnOrderStatus(int orderId, const std::string& status, Decim
 void IbOrderHandler::OnOpenOrder(int orderId, const Contract&, const ::Order& ibOrder, const OrderState&)
 {
 	std::scoped_lock lock(mutex_);
+	if (resyncing_)
+		openInTws_.insert(orderId);
 	auto it = orders_.find(orderId);
 	if (it == orders_.end())
 		return;
@@ -331,6 +336,94 @@ void IbOrderHandler::onOrderError(int orderId, int errorCode, const std::string&
 	}
 	// errors on a working order with nothing pending (e.g. a TWS warning we do not know) are not
 	// reported; the order's status updates still are
+}
+
+// ---------------------------------------------------------------------------------------------
+// catching up with TWS after a (re)connect
+// ---------------------------------------------------------------------------------------------
+
+void IbOrderHandler::onTwsConnected()
+{
+	std::scoped_lock lock(mutex_);
+	resyncing_ = true;
+	resyncExecutionsDone_ = false;
+	resyncOpenOrdersDone_ = false;
+	openInTws_.clear();
+	if (!connector_.requestOrderRefresh())
+		resyncing_ = false;
+}
+
+void IbOrderHandler::onTwsDisconnected()
+{
+	std::scoped_lock lock(mutex_);
+	resyncing_ = false; // starts again on the next connect
+}
+
+bool IbOrderHandler::isResyncing() const
+{
+	std::scoped_lock lock(mutex_);
+	return resyncing_;
+}
+
+void IbOrderHandler::OnExecDetailsEnd(int)
+{
+	std::scoped_lock lock(mutex_);
+	if (!resyncing_)
+		return;
+	resyncExecutionsDone_ = true;
+	finishResyncIfDone();
+}
+
+void IbOrderHandler::OnOpenOrderEnd()
+{
+	std::scoped_lock lock(mutex_);
+	if (!resyncing_)
+		return;
+	resyncOpenOrdersDone_ = true;
+	finishResyncIfDone();
+}
+
+void IbOrderHandler::finishResyncIfDone()
+{
+	if (!resyncExecutionsDone_ || !resyncOpenOrdersDone_)
+		return;
+	reconcile();
+	resyncing_ = false;
+}
+
+void IbOrderHandler::reconcile()
+{
+	for (auto& [ibOrderId, order] : orders_)
+	{
+		if (order.isTerminal())
+			continue;
+		if (openInTws_.count(ibOrderId) == 0)
+		{
+			// not filled (executions were replayed first) and no longer working in TWS
+			std::optional<PendingChange> pending = std::move(order.pending);
+			order.pending.reset();
+			order.ordStatus = fv::ExecCanceled;
+			ExecutionReport canceled = report(order, fv::ExecCanceled);
+			canceled.text = "Order is no longer open in TWS (checked after connecting to TWS)";
+			if (pending && !pending->isReplace)
+			{
+				canceled.origClOrdId = canceled.clOrdId;
+				canceled.clOrdId = pending->clOrdId;
+			}
+			deliver(order.clientCompId, canceled);
+			if (pending && pending->isReplace)
+				cancelReject(order.clientCompId, &order, pending->clOrdId, order.terms.clOrdId, true,
+						fv::CxlRejTooLate, "Order is no longer open in TWS");
+		}
+		else if (order.pending)
+		{
+			// TWS may never have received the request; the client can send it again
+			const PendingChange pending = *order.pending;
+			order.pending.reset();
+			cancelReject(order.clientCompId, &order, pending.clOrdId, order.terms.clOrdId, pending.isReplace,
+					fv::CxlRejBrokerOption, "Not confirmed by TWS before the connection was lost; the order is still open");
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -30,6 +30,7 @@ TEST(EngineConfig, SampleGatewayConfig)
 	EXPECT_TRUE(c.fixConfigFile.is_absolute());
 	EXPECT_TRUE(std::filesystem::exists(c.fixConfigFile)) << c.fixConfigFile;
 	EXPECT_EQ(c.fixConfigFile.filename(), "acceptor.xml");
+	EXPECT_TRUE(c.twsReconnect);
 }
 
 TEST(EngineConfig, ResolvesPathsAgainstTheConfigFile)
@@ -45,6 +46,18 @@ TEST(EngineConfig, ResolvesPathsAgainstTheConfigFile)
 	EXPECT_EQ(c.fixConfigFile, std::filesystem::absolute(file).parent_path() / "sub" / "acceptor.xml");
 	EXPECT_EQ(c.fixSessionName, "GW");
 	EXPECT_EQ(c.fixGlobalLogFile, "/tmp/fix8.log");
+	EXPECT_TRUE(c.twsReconnect) << "reconnect is on by default";
+	EXPECT_EQ(c.twsReconnectMaxInterval, std::chrono::seconds(30));
+}
+
+TEST(EngineConfig, ReconnectSettings)
+{
+	EngineConfig c = loadEngineConfig(writeConfig("reconnect.cfg",
+		"fix_config = a.xml\nreconnect = false\nreconnect_max_interval_seconds = 5\n"));
+	EXPECT_FALSE(c.twsReconnect);
+	EXPECT_EQ(c.twsReconnectMaxInterval, std::chrono::seconds(5));
+	EXPECT_THROW(loadEngineConfig(writeConfig("reconnect_bad.cfg", "fix_config = a.xml\nreconnect = maybe\n")),
+		std::runtime_error);
 }
 
 TEST(EngineConfig, RejectsMistakes)
