@@ -44,7 +44,7 @@ class FakeConnector : public ib_fix::ib::GatewayConnector
 		++refreshRequests;
 		return true;
 	}
-	uint32_t GetNextOrderId() override { return ++nextId_; }
+	int GetNextOrderId() override { return ++nextId_; }
 	bool isAvailable() const override { return connected; }
 
 	std::vector<Placed> placed() const
@@ -67,7 +67,7 @@ class FakeConnector : public ib_fix::ib::GatewayConnector
 	mutable std::mutex mutex_;
 	std::vector<Placed> placed_;
 	std::vector<int> canceled_;
-	uint32_t nextId_ = 100;
+	int nextId_ = 100;
 };
 
 inline Decimal dec(double value)

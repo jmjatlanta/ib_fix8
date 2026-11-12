@@ -137,7 +137,7 @@ void IbOrderHandler::onNewOrder(const std::string& clientCompId, const NewOrderR
 	if (!connector_.isAvailable())
 		return reject(clientCompId, request, fv::OrdRejBrokerOption, "Not connected to TWS");
 
-	const int ibOrderId = static_cast<int>(connector_.GetNextOrderId());
+	const int ibOrderId = connector_.GetNextOrderId();
 	// TWS callbacks for this order wait on mutex_, so they find the record complete
 	if (!connector_.placeOrder(ibOrderId, ib.result->contract, ib.result->order))
 		return reject(clientCompId, request, fv::OrdRejBrokerOption, "Not connected to TWS");

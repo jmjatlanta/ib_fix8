@@ -147,7 +147,8 @@ void GatewayConnector::connectionClosed()
 void GatewayConnector::error(int id, time_t errorTime, int errorCode, const std::string& errorString,
 		const std::string& advancedOrderRejectJson)
 {
-	if (id > 0)
+	// request ids are in their own range, so an error with a request id is not an order error
+	if (IsOrderId(id))
 		if (TwsEventListener* listener = listener_.load())
 			listener->onOrderError(id, errorCode, errorString);
 
