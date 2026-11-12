@@ -29,15 +29,6 @@ bool samePrice(double a, double b)
 	return std::abs(a - b) < 1e-9;
 }
 
-/// TWS error codes that do not mean a request failed
-bool isInformational(int errorCode)
-{
-	return errorCode == 202                              // "Order Canceled" - the status update reports it
-		|| errorCode == 399                              // order message/warning, e.g. queued until open
-		|| errorCode == 10167 || errorCode == 10168      // delayed / no market data
-		|| (errorCode >= 2100 && errorCode <= 2199);     // warnings
-}
-
 int cancelRejectReason(int errorCode)
 {
 	switch (errorCode)
@@ -331,16 +322,18 @@ void IbOrderHandler::OnExecDetails(int, const Contract&, const Execution& execut
 	}
 }
 
-void IbOrderHandler::onOrderError(int orderId, int errorCode, const std::string& message)
+void IbOrderHandler::OnOrderError(int orderId, const ib_helper::IbError& err)
 {
-	if (isInformational(errorCode))
+	// Connectivity counts as a failure here: e.g. 504 "Not connected" for an order that was sent
+	// just as the connection dropped means TWS never got it
+	if (err.severity == ib_helper::IbSeverity::Info || err.severity == ib_helper::IbSeverity::Warning)
 		return;
 	std::scoped_lock lock(mutex_);
 	auto it = orders_.find(orderId);
 	if (it == orders_.end())
 		return;
 	OrderRecord& order = it->second;
-	const std::string text = twsErrorText(errorCode, message);
+	const std::string text = twsErrorText(err.code, err.message);
 
 	if (order.pending)
 	{
@@ -348,7 +341,7 @@ void IbOrderHandler::onOrderError(int orderId, int errorCode, const std::string&
 		const PendingChange pending = *order.pending;
 		order.pending.reset();
 		cancelReject(order.clientCompId, &order, pending.clOrdId, order.terms.clOrdId, pending.isReplace,
-				cancelRejectReason(errorCode), text);
+				cancelRejectReason(err.code), text);
 		return;
 	}
 	if (!order.acknowledged && !order.isTerminal())

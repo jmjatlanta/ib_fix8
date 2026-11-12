@@ -22,6 +22,7 @@ add_executable(ib_fix_tests
 	IbTranslationTest.cpp
 	IbOrderHandlerTest.cpp
 	GatewayTest.cpp
+	GatewayConnectorTest.cpp
 	TwsSettingsTest.cpp
 	EngineTest.cpp
 	OrderJournalTest.cpp

@@ -6,16 +6,9 @@
 
 namespace ib_fix::ib {
 
-namespace {
-constexpr int ConnectFail = 502;
-constexpr int SocketException = 509;
-constexpr int IbConnectivityLost = 1100;
-constexpr int IbConnectivityRestoredDataLost = 1101;
-constexpr int IbConnectivityRestored = 1102;
-} // namespace
-
 GatewayConnector::GatewayConnector() : ib_helper::IBConnector()
 {
+	AddConnectionMonitor(&monitor_);
 }
 
 GatewayConnector::GatewayConnector(const std::string& host, int port, int clientId) : ib_helper::IBConnector()
@@ -24,6 +17,7 @@ GatewayConnector::GatewayConnector(const std::string& host, int port, int client
 	this->hostname = host;
 	this->port = port;
 	this->clientId = clientId;
+	AddConnectionMonitor(&monitor_);
 	connect();
 }
 
@@ -63,6 +57,8 @@ GatewayConnector::~GatewayConnector()
 {
 	stopReconnect();
 	listener_ = nullptr;
+	// the base destructor disconnects and notifies the monitors, after monitor_ is gone
+	RemoveConnectionMonitor(&monitor_);
 }
 
 void GatewayConnector::setLog(std::function<void(const std::string&)> log)
@@ -144,37 +140,25 @@ void GatewayConnector::connectionClosed()
 	supervisorWake_.notify_all();
 }
 
-void GatewayConnector::error(int id, time_t errorTime, int errorCode, const std::string& errorString,
-		const std::string& advancedOrderRejectJson)
+void GatewayConnector::cleanUpPartialConnection()
 {
-	// request ids are in their own range, so an error with a request id is not an order error
-	if (IsOrderId(id))
-		if (TwsEventListener* listener = listener_.load())
-			listener->onOrderError(id, errorCode, errorString);
+	ib_helper::IBConnector::cleanUpPartialConnection();
+	socketFailed_ = true;
+	supervisorWake_.notify_all();
+}
 
-	if ((errorCode == SocketException || errorCode == ConnectFail) && GetConnectionStatus() == ConnectionStatus::FULLY_CONNECTED)
+void GatewayConnector::onIbConnectivity(bool up, bool dataLost)
+{
+	ibConnected_ = up;
+	if (!up)
 	{
-		// the connection is broken. ib_helper would disconnect here, on the TWS API's own thread,
-		// which cannot work; leave it to the supervisor
-		socketFailed_ = true;
-		markUnavailable("Connection to TWS failed: " + errorString);
-		supervisorWake_.notify_all();
+		log("TWS lost its connection to IB");
 		return;
 	}
-	if (errorCode == IbConnectivityLost)
-	{
-		ibConnected_ = false;
-		log("TWS lost its connection to IB: " + errorString);
-	}
-	else if (errorCode == IbConnectivityRestored || errorCode == IbConnectivityRestoredDataLost)
-	{
-		ibConnected_ = true;
-		log("TWS connection to IB restored: " + errorString);
-		if (available_)
-			if (TwsEventListener* listener = listener_.load())
-				listener->onTwsConnected(); // catch up on anything that happened meanwhile
-	}
-	ib_helper::IBConnector::error(id, errorTime, errorCode, errorString, advancedOrderRejectJson);
+	log(std::string("TWS connection to IB restored") + (dataLost ? " (data lost)" : ""));
+	if (available_)
+		if (TwsEventListener* listener = listener_.load())
+			listener->onTwsConnected(); // catch up on anything that happened meanwhile
 }
 
 void GatewayConnector::markUnavailable(const std::string& reason)

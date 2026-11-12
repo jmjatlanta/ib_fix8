@@ -1,7 +1,7 @@
 #pragma once
 // The gateway's connection to TWS / IB Gateway: an ib_helper::IBConnector that
-//  - passes order errors (e.g. 201, 161) and connection changes to a TwsEventListener;
-//    ib_helper only passes connection errors to its monitors
+//  - passes connection changes to a TwsEventListener (order errors reach the
+//    ib_helper::OrderHandlers, through OrderHandler::OnOrderError)
 //  - reconnects automatically when the connection is lost (enableReconnect)
 //  - only sends orders while connected, and says whether it did (placeOrder, cancelOrder)
 #include "IBConnector.hpp"
@@ -20,8 +20,6 @@ class TwsEventListener
 {
 	public:
 	virtual ~TwsEventListener() = default;
-	/// @param id the order (or request) id the error refers to; always > 0
-	virtual void onOrderError(int id, int errorCode, const std::string& message) = 0;
 	/// TWS accepted the connection (first connect or reconnect), or TWS's own connection to IB was
 	/// restored. Orders can be sent; what happened while disconnected should be requested.
 	virtual void onTwsConnected() {}
@@ -73,16 +71,19 @@ class GatewayConnector : public ib_helper::IBConnector
 	/// for test doubles: does not connect
 	GatewayConnector();
 
-	void error(int id, time_t errorTime, int errorCode, const std::string& errorString,
-			const std::string& advancedOrderRejectJson) override;
 	void nextValidId(OrderId orderId) override;
 	/// TWS answered the asynchronous handshake: start the API session
 	void connectAck() override;
+	/// TWS closed the connection, or (through ib_helper) a 502/509 broke it
 	void connectionClosed() override;
+	/// a 502/509 broke the connection during the handshake: retry without waiting for the timeout
+	void cleanUpPartialConnection() override;
 
 	private:
 	void log(const std::string& message);
 	void markUnavailable(const std::string& reason);
+	/// TWS's own connection to IB changed (1100 lost; 1101/1102 restored)
+	void onIbConnectivity(bool up, bool dataLost);
 	void supervise(std::chrono::seconds maxInterval, std::chrono::seconds handshakeTimeout);
 	std::string address() const;
 
@@ -94,8 +95,23 @@ class GatewayConnector : public ib_helper::IBConnector
 	mutable std::shared_mutex clientMutex_;
 	std::atomic<bool> available_ = false;       // connection accepted and not since lost
 	std::atomic<bool> ibConnected_ = true;      // TWS's own connection to IB (errors 1100 / 1101, 1102)
-	std::atomic<bool> socketFailed_ = false;    // error 509: the connection is broken
+	std::atomic<bool> socketFailed_ = false;    // 502/509 during the handshake: do not wait for it
 	std::atomic<bool> notifiedConnected_ = false;
+
+	/// receives ib_helper's connection callbacks for this connector
+	class Monitor : public ib_helper::IBConnectionMonitor
+	{
+		public:
+		explicit Monitor(GatewayConnector& owner) : owner_(owner) {}
+		void OnConnect(ib_helper::IBConnector*) override {}
+		void OnFullConnect(ib_helper::IBConnector*) override {}
+		void OnDisconnect(ib_helper::IBConnector*) override {}
+		void OnError(ib_helper::IBConnector*, int, int, const std::string&, const std::string&) override {}
+		void OnIbConnectivity(ib_helper::IBConnector*, bool up, bool dataLost) override { owner_.onIbConnectivity(up, dataLost); }
+		private:
+		GatewayConnector& owner_;
+	};
+	Monitor monitor_{ *this };
 
 	std::thread supervisor_;
 	std::mutex supervisorMutex_;
