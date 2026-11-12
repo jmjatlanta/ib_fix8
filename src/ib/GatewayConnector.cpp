@@ -6,11 +6,6 @@
 
 namespace ib_fix::ib {
 
-namespace {
-constexpr int ConnectFail = 502;
-constexpr int SocketException = 509;
-} // namespace
-
 GatewayConnector::GatewayConnector() : ib_helper::IBConnector()
 {
 	AddConnectionMonitor(&monitor_);
@@ -145,19 +140,11 @@ void GatewayConnector::connectionClosed()
 	supervisorWake_.notify_all();
 }
 
-void GatewayConnector::error(int id, time_t errorTime, int errorCode, const std::string& errorString,
-		const std::string& advancedOrderRejectJson)
+void GatewayConnector::cleanUpPartialConnection()
 {
-	if ((errorCode == SocketException || errorCode == ConnectFail) && GetConnectionStatus() == ConnectionStatus::FULLY_CONNECTED)
-	{
-		// the connection is broken. ib_helper would disconnect here, on the TWS API's own thread,
-		// which cannot work; leave it to the supervisor
-		socketFailed_ = true;
-		markUnavailable("Connection to TWS failed: " + errorString);
-		supervisorWake_.notify_all();
-		return;
-	}
-	ib_helper::IBConnector::error(id, errorTime, errorCode, errorString, advancedOrderRejectJson);
+	ib_helper::IBConnector::cleanUpPartialConnection();
+	socketFailed_ = true;
+	supervisorWake_.notify_all();
 }
 
 void GatewayConnector::onIbConnectivity(bool up, bool dataLost)

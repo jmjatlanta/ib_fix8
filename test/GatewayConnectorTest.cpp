@@ -3,6 +3,12 @@
 #include "ib/GatewayConnector.hpp"
 #include <gtest/gtest.h>
 #include <atomic>
+#include <chrono>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -24,7 +30,40 @@ class TestConnector : public GatewayConnector
 		nextValidId(1);
 	}
 	void TwsError(int code, const std::string& message) { error(-1, time(nullptr), code, message, ""); }
+	/// where the supervisor's reconnects go: a local port nothing listens on
+	void SetAddress(const std::string& host, int port) { hostname = host; this->port = port; }
 };
+
+class Log
+{
+	public:
+	std::function<void(const std::string&)> sink()
+	{
+		return [this](const std::string& line) { std::scoped_lock lock(m); lines.push_back(line); };
+	}
+	bool contains(const std::string& text)
+	{
+		std::scoped_lock lock(m);
+		for (const auto& l : lines)
+			if (l.find(text) != std::string::npos)
+				return true;
+		return false;
+	}
+	std::mutex m;
+	std::vector<std::string> lines;
+};
+
+bool waitFor(std::function<bool()> pred, std::chrono::milliseconds timeout)
+{
+	const auto end = std::chrono::steady_clock::now() + timeout;
+	while (std::chrono::steady_clock::now() < end)
+	{
+		if (pred())
+			return true;
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	return pred();
+}
 
 class Listener : public ib_fix::ib::TwsEventListener
 {
@@ -79,4 +118,51 @@ TEST_F(GatewayConnectorTest, RestoredBeforeTheConnectionIsAcceptedDoesNotNotify)
 	connector.TwsError(1102, "Connectivity between IB and Trader Workstation has been restored - data maintained.");
 	EXPECT_EQ(listener.connected, 0);
 	EXPECT_FALSE(connector.isAvailable());
+}
+
+TEST_F(GatewayConnectorTest, SocketFailureWhileConnected)
+{
+	for (int code : { 502, 509 })
+	{
+		TestConnector conn;
+		Listener l;
+		conn.setListener(&l);
+		conn.Accept();
+		ASSERT_TRUE(conn.isAvailable());
+		conn.TwsError(code, "Exception caught while reading socket - Connection reset by peer");
+		// ib_helper treats it as a closed connection; nothing is disconnected on this (TWS's) thread
+		EXPECT_FALSE(conn.isAvailable()) << code;
+		EXPECT_EQ(l.disconnected, 1) << code;
+		EXPECT_EQ(conn.GetConnectionStatus(), Status::SHUTDOWN) << code;
+		conn.setListener(nullptr);
+	}
+}
+
+TEST_F(GatewayConnectorTest, SupervisorReconnectsAfterSocketFailure)
+{
+	Log log;
+	connector.setLog(log.sink());
+	connector.SetAddress("127.0.0.1", 1);
+	connector.Accept();
+	connector.enableReconnect(std::chrono::seconds(1), std::chrono::seconds(30));
+	connector.TwsError(509, "Exception caught while reading socket - Connection reset by peer");
+	EXPECT_TRUE(waitFor([&] { return log.contains("Reconnecting to TWS"); }, std::chrono::seconds(3)));
+	connector.stopReconnect();
+	connector.setLog(nullptr);
+}
+
+TEST_F(GatewayConnectorTest, SupervisorDoesNotWaitOutTheHandshakeAfterSocketFailure)
+{
+	// a 502/509 during the handshake: retry now rather than after the 30s handshake timeout
+	Log log;
+	connector.setLog(log.sink());
+	connector.SetAddress("127.0.0.1", 1);
+	connector.SetStatus(Status::PARTIALLY_CONNECTED);
+	connector.enableReconnect(std::chrono::seconds(1), std::chrono::seconds(30));
+	std::this_thread::sleep_for(std::chrono::milliseconds(300));
+	EXPECT_FALSE(log.contains("Reconnecting to TWS")); // still waiting for the handshake
+	connector.TwsError(502, "Couldn't connect to TWS.");
+	EXPECT_TRUE(waitFor([&] { return log.contains("Reconnecting to TWS"); }, std::chrono::seconds(3)));
+	connector.stopReconnect();
+	connector.setLog(nullptr);
 }

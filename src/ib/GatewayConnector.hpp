@@ -71,12 +71,13 @@ class GatewayConnector : public ib_helper::IBConnector
 	/// for test doubles: does not connect
 	GatewayConnector();
 
-	void error(int id, time_t errorTime, int errorCode, const std::string& errorString,
-			const std::string& advancedOrderRejectJson) override;
 	void nextValidId(OrderId orderId) override;
 	/// TWS answered the asynchronous handshake: start the API session
 	void connectAck() override;
+	/// TWS closed the connection, or (through ib_helper) a 502/509 broke it
 	void connectionClosed() override;
+	/// a 502/509 broke the connection during the handshake: retry without waiting for the timeout
+	void cleanUpPartialConnection() override;
 
 	private:
 	void log(const std::string& message);
@@ -94,7 +95,7 @@ class GatewayConnector : public ib_helper::IBConnector
 	mutable std::shared_mutex clientMutex_;
 	std::atomic<bool> available_ = false;       // connection accepted and not since lost
 	std::atomic<bool> ibConnected_ = true;      // TWS's own connection to IB (errors 1100 / 1101, 1102)
-	std::atomic<bool> socketFailed_ = false;    // error 509: the connection is broken
+	std::atomic<bool> socketFailed_ = false;    // 502/509 during the handshake: do not wait for it
 	std::atomic<bool> notifiedConnected_ = false;
 
 	/// receives ib_helper's connection callbacks for this connector
