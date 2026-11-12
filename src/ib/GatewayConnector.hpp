@@ -1,7 +1,7 @@
 #pragma once
 // The gateway's connection to TWS / IB Gateway: an ib_helper::IBConnector that
-//  - passes order errors (e.g. 201, 161) and connection changes to a TwsEventListener;
-//    ib_helper only passes connection errors to its monitors
+//  - passes connection changes to a TwsEventListener (order errors reach the
+//    ib_helper::OrderHandlers, through OrderHandler::OnOrderError)
 //  - reconnects automatically when the connection is lost (enableReconnect)
 //  - only sends orders while connected, and says whether it did (placeOrder, cancelOrder)
 #include "IBConnector.hpp"
@@ -20,8 +20,6 @@ class TwsEventListener
 {
 	public:
 	virtual ~TwsEventListener() = default;
-	/// @param id the order (or request) id the error refers to; always > 0
-	virtual void onOrderError(int id, int errorCode, const std::string& message) = 0;
 	/// TWS accepted the connection (first connect or reconnect), or TWS's own connection to IB was
 	/// restored. Orders can be sent; what happened while disconnected should be requested.
 	virtual void onTwsConnected() {}

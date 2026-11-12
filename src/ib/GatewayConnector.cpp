@@ -147,11 +147,6 @@ void GatewayConnector::connectionClosed()
 void GatewayConnector::error(int id, time_t errorTime, int errorCode, const std::string& errorString,
 		const std::string& advancedOrderRejectJson)
 {
-	// request ids are in their own range, so an error with a request id is not an order error
-	if (IsOrderId(id))
-		if (TwsEventListener* listener = listener_.load())
-			listener->onOrderError(id, errorCode, errorString);
-
 	if ((errorCode == SocketException || errorCode == ConnectFail) && GetConnectionStatus() == ConnectionStatus::FULLY_CONNECTED)
 	{
 		// the connection is broken. ib_helper would disconnect here, on the TWS API's own thread,

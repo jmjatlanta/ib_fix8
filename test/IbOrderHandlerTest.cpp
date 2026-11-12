@@ -173,7 +173,7 @@ TEST_F(IbOrderHandlerTest, TwsErrorBeforeAcknowledgementRejectsOrder)
 	handler.onNewOrder(Client, limitBuy("ord-1"));
 	const int id = connector.placed().back().orderId;
 
-	handler.onOrderError(id, 201, "Order rejected - reason: insufficient margin");
+	connector.twsError(id, 201, "Order rejected - reason: insufficient margin");
 	EXPECT_EQ(lastReport().execType, fv::ExecRejected);
 	EXPECT_EQ(lastReport().leavesQty, 0.0);
 	EXPECT_NE(lastReport().text.find("201"), std::string::npos) << lastReport().text;
@@ -183,6 +183,16 @@ TEST_F(IbOrderHandlerTest, TwsErrorBeforeAcknowledgementRejectsOrder)
 	status(id, "Inactive");
 	status(id, "Cancelled");
 	EXPECT_EQ(responder.reports.size(), before);
+}
+
+TEST_F(IbOrderHandlerTest, NotConnectedErrorRejectsOrder)
+{
+	// TWS API reports 504 for an order sent just as the connection dropped: TWS never got it
+	handler.onNewOrder(Client, limitBuy("ord-1"));
+	const int id = connector.placed().back().orderId;
+	connector.twsError(id, 504, "Not connected");
+	EXPECT_EQ(lastReport().execType, fv::ExecRejected);
+	EXPECT_NE(lastReport().text.find("504"), std::string::npos) << lastReport().text;
 }
 
 TEST_F(IbOrderHandlerTest, InactiveBeforeAcknowledgementRejectsOrder)
@@ -197,9 +207,9 @@ TEST_F(IbOrderHandlerTest, InformationalTwsMessagesAreIgnored)
 {
 	const int id = placeAndAck("ord-1");
 	const size_t before = responder.reports.size();
-	handler.onOrderError(id, 399, "Order will not be placed at the exchange until market open");
-	handler.onOrderError(id, 2109, "Outside regular trading hours");
-	handler.onOrderError(id, 202, "Order Canceled");
+	connector.twsError(id, 399, "Order will not be placed at the exchange until market open");
+	connector.twsError(id, 2109, "Outside regular trading hours");
+	connector.twsError(id, 202, "Order Canceled");
 	EXPECT_EQ(responder.reports.size(), before);
 	EXPECT_TRUE(responder.cancelRejects.empty());
 }
@@ -252,7 +262,7 @@ TEST_F(IbOrderHandlerTest, CancelRefusedByTwsIsRejected)
 {
 	const int id = placeAndAck("ord-1");
 	handler.onCancel(Client, CancelRequest{ "cxl-1", "ord-1" });
-	handler.onOrderError(id, 161, "Cancel attempted when order is not in a cancellable state");
+	connector.twsError(id, 161, "Cancel attempted when order is not in a cancellable state");
 	EXPECT_EQ(lastCancelReject().clOrdId, "cxl-1");
 	EXPECT_EQ(lastCancelReject().origClOrdId, "ord-1");
 	EXPECT_EQ(*lastCancelReject().cxlRejReason, fv::CxlRejTooLate);
@@ -345,7 +355,7 @@ TEST_F(IbOrderHandlerTest, ReplaceRefusedByTwsIsRejected)
 	static_cast<NewOrderRequest&>(replace) = limitBuy("rep-1", 150);
 	replace.origClOrdId = "ord-1";
 	handler.onReplace(Client, replace);
-	handler.onOrderError(id, 10148, "OrderId that needs to be cancelled can not be cancelled");
+	connector.twsError(id, 10148, "OrderId that needs to be cancelled can not be cancelled");
 	EXPECT_EQ(lastCancelReject().clOrdId, "rep-1");
 	EXPECT_EQ(lastCancelReject().cxlRejResponseTo, fv::CxlRejToReplace);
 	EXPECT_EQ(lastCancelReject().ordStatus, fv::ExecNew);
@@ -529,7 +539,7 @@ TEST_F(IbOrderHandlerTest, CallbacksForUnknownOrdersAreIgnored)
 {
 	status(9999, "Submitted");
 	handler.OnExecDetails(-1, Contract{}, makeExecution(9999, "exec-x", 1, 1, 1, 1));
-	handler.onOrderError(9999, 201, "rejected");
+	connector.twsError(9999, 201, "rejected");
 	EXPECT_TRUE(responder.reports.empty());
 	EXPECT_TRUE(responder.cancelRejects.empty());
 }

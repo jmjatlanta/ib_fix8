@@ -93,13 +93,15 @@ class IbOrderHandler : public OrderRequestHandler,
 			const std::string& whyHeld, double mktCapPrice) override;
 	void OnOpenOrderEnd() override;
 	void OnOrderBound(long orderId, int apiClientId, int apiOrderId) override {}
+	/// a TWS error, warning or confirmation for an order. Info and warnings (e.g. 202, 399, 2109)
+	/// are ignored; the order's status updates report what happened.
+	void OnOrderError(int orderId, const ib_helper::IbError& err) override;
 
 	// ib_helper::ExecutionHandler (from TWS)
 	void OnExecDetails(int reqId, const Contract& contract, const Execution& execution) override;
 	void OnExecDetailsEnd(int reqId) override;
 
 	// TwsEventListener (from TWS, via GatewayConnector)
-	void onOrderError(int orderId, int errorCode, const std::string& message) override;
 	void onTwsConnected() override;
 	void onTwsDisconnected() override;
 	/// catching up with TWS after a (re)connect

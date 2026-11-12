@@ -1,6 +1,7 @@
 #pragma once
 // Stands in for TWS: records the orders and cancels sent to it. Tests play TWS's side by calling
-// the handler's callbacks (OnOrderStatus, OnExecDetails, OnOpenOrder, onOrderError, ...) directly.
+// the handler's callbacks (OnOrderStatus, OnExecDetails, OnOpenOrder, ...) directly, and send TWS
+// errors through twsError(), which goes through ib_helper's error routing as a real one would.
 #include "ib/GatewayConnector.hpp"
 #include "Decimal.h"
 #include "Execution.h"
@@ -45,6 +46,8 @@ class FakeConnector : public ib_fix::ib::GatewayConnector
 		return true;
 	}
 	int GetNextOrderId() override { return ++nextId_; }
+	/// TWS reports an error, warning or confirmation for an id
+	void twsError(int id, int errorCode, const std::string& message) { error(id, time(nullptr), errorCode, message, ""); }
 	bool isAvailable() const override { return connected; }
 
 	std::vector<Placed> placed() const
