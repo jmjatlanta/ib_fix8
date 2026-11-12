@@ -5,4 +5,4 @@
 [submodule "external/ib_helper"]
 	path = external/ib_helper
 	url = https://github.com/jmjatlanta/ib_helper.git
-	branch = error_refactor
+	branch = protobuf
