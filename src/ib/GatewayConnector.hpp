@@ -81,6 +81,8 @@ class GatewayConnector : public ib_helper::IBConnector
 	private:
 	void log(const std::string& message);
 	void markUnavailable(const std::string& reason);
+	/// TWS's own connection to IB changed (1100 lost; 1101/1102 restored)
+	void onIbConnectivity(bool up, bool dataLost);
 	void supervise(std::chrono::seconds maxInterval, std::chrono::seconds handshakeTimeout);
 	std::string address() const;
 
@@ -94,6 +96,21 @@ class GatewayConnector : public ib_helper::IBConnector
 	std::atomic<bool> ibConnected_ = true;      // TWS's own connection to IB (errors 1100 / 1101, 1102)
 	std::atomic<bool> socketFailed_ = false;    // error 509: the connection is broken
 	std::atomic<bool> notifiedConnected_ = false;
+
+	/// receives ib_helper's connection callbacks for this connector
+	class Monitor : public ib_helper::IBConnectionMonitor
+	{
+		public:
+		explicit Monitor(GatewayConnector& owner) : owner_(owner) {}
+		void OnConnect(ib_helper::IBConnector*) override {}
+		void OnFullConnect(ib_helper::IBConnector*) override {}
+		void OnDisconnect(ib_helper::IBConnector*) override {}
+		void OnError(ib_helper::IBConnector*, int, int, const std::string&, const std::string&) override {}
+		void OnIbConnectivity(ib_helper::IBConnector*, bool up, bool dataLost) override { owner_.onIbConnectivity(up, dataLost); }
+		private:
+		GatewayConnector& owner_;
+	};
+	Monitor monitor_{ *this };
 
 	std::thread supervisor_;
 	std::mutex supervisorMutex_;
